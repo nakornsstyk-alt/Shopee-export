@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Order Exporter — Shopee",
+  "version": "1.0.0",
+  "description": "Auto-export orders from Shopee seller center across all your brand windows",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "alarms",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://seller.shopee.co.th/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://seller.shopee.co.th/*"],
+      "js": ["content/shopee.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

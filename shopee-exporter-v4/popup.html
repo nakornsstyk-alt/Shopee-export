@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Order Exporter</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0d0d0f;--surface:#161618;--border:#2a2a2e;
+    --accent:#ff5722;--green:#4caf7d;--yellow:#ffc14f;
+    --text:#f0ede8;--muted:#6b6b75;--r:10px;
+  }
+  body{width:360px;background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;font-size:13px}
+
+  .header{padding:16px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  .logo{width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+  .header-text h1{font-size:14px;font-weight:800}
+  .header-text p{font-size:10px;color:var(--muted);margin-top:1px}
+  .badge{margin-left:auto;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:3px 9px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)}
+  .badge span{color:var(--accent);font-weight:600}
+
+  .section{padding:12px 18px;border-bottom:1px solid var(--border)}
+  .section-label{font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+
+  .tab-list{display:flex;flex-direction:column;gap:5px}
+  .tab-item{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+  .tab-favicon{font-size:14px;flex-shrink:0}
+  .tab-info{flex:1;min-width:0}
+  .tab-title{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tab-url{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tab-status{font-size:10px;font-family:'DM Mono',monospace;padding:2px 7px;border-radius:20px;flex-shrink:0}
+  .tab-status.idle   {background:#1e1e24;color:var(--muted)}
+  .tab-status.running{background:#2a1f0a;color:var(--yellow)}
+  .tab-status.done   {background:#0d2018;color:var(--green)}
+  .tab-status.error  {background:#2a0d0d;color:#ff6b6b}
+  .tab-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);cursor:pointer;padding:3px 8px;font-size:10px;font-family:'Syne',sans-serif;transition:all .15s;flex-shrink:0}
+  .tab-btn:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+  .tab-btn:disabled{opacity:0.4;cursor:not-allowed}
+  .no-tabs{text-align:center;color:var(--muted);font-size:12px;padding:14px 0;line-height:1.8}
+  .no-tabs a{color:var(--accent);cursor:pointer;text-decoration:none}
+
+  /* ── Preset buttons — each gets its own listener, no delegation ── */
+  .date-presets{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .preset-btn{
+    padding:5px 12px;border-radius:20px;
+    border:1px solid var(--border);background:var(--surface);
+    color:var(--muted);font-size:11px;
+    font-family:'Syne',sans-serif;font-weight:600;
+    cursor:pointer;
+    /* Explicit pointer-events so nothing blocks clicks */
+    pointer-events:auto;
+    user-select:none;
+    -webkit-user-select:none;
+    transition:all .15s;
+  }
+  .preset-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  .preset-btn:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+
+  .date-row{display:flex;gap:6px;align-items:center}
+  .date-row input[type="date"]{
+    flex:1;background:var(--surface);border:1px solid var(--border);
+    border-radius:7px;color:var(--text);font-family:'DM Mono',monospace;
+    font-size:11px;padding:7px 8px;outline:none;color-scheme:dark;
+    cursor:pointer;transition:border-color .15s;
+    pointer-events:auto;
+  }
+  .date-row input[type="date"]:not(:disabled):hover,
+  .date-row input[type="date"]:focus{border-color:var(--accent)}
+  .date-row input[type="date"]:disabled{opacity:0.3;cursor:not-allowed;pointer-events:none}
+  .date-sep{color:var(--muted);font-size:11px;flex-shrink:0}
+
+  .schedule-row{display:flex;align-items:center;gap:10px}
+  .toggle{position:relative;width:36px;height:20px;flex-shrink:0}
+  .toggle input{opacity:0;width:0;height:0;position:absolute}
+  .toggle-slider{position:absolute;inset:0;background:var(--border);border-radius:20px;cursor:pointer;transition:background .2s}
+  .toggle-slider::before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:var(--muted);border-radius:50%;transition:transform .2s,background .2s}
+  .toggle input:checked+.toggle-slider{background:var(--accent)}
+  .toggle input:checked+.toggle-slider::before{transform:translateX(16px);background:#fff}
+  .toggle-label{font-size:12px;font-weight:600}
+  .time-wrap{margin-left:auto}
+  .time-wrap input[type="time"]{background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:'DM Mono',monospace;font-size:12px;padding:5px 9px;width:82px;outline:none;color-scheme:dark;transition:border-color .15s}
+  .next-run{font-size:10px;color:var(--muted);margin-top:7px;font-family:'DM Mono',monospace}
+  .next-run span{color:var(--yellow)}
+
+  .cta{padding:12px 18px 14px}
+  .export-all-btn{width:100%;background:var(--accent);color:#fff;border:none;border-radius:var(--r);padding:13px;font-family:'Syne',sans-serif;font-size:14px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:background .15s,transform .1s;overflow:hidden;position:relative}
+  .export-all-btn::before{content:'';position:absolute;top:0;left:-100%;width:60px;height:100%;background:rgba(255,255,255,.15);transform:skewX(-20deg);transition:left .4s}
+  .export-all-btn:hover::before{left:120%}
+  .export-all-btn:hover{background:#e64a19}
+  .export-all-btn:active{transform:scale(.98)}
+  .export-all-btn:disabled{background:var(--border);color:var(--muted);cursor:not-allowed}
+
+  .log-strip{padding:6px 18px 12px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);min-height:28px}
+  .log-entry.ok  {color:var(--green)}
+  .log-entry.err {color:#ff6b6b}
+  .log-entry.warn{color:var(--yellow)}
+
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spinner{width:13px;height:13px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:var(--bg)}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">📦</div>
+  <div class="header-text">
+    <h1>Order Exporter</h1>
+    <p>Shopee · Multi-brand</p>
+  </div>
+  <div class="badge">Shopee <span id="tabCount">—</span></div>
+</div>
+
+<!-- Seller Tabs -->
+<div class="section">
+  <div class="section-label">Seller Tabs</div>
+  <div id="tabList"><div class="no-tabs">Loading…</div></div>
+</div>
+
+<!-- Date Range — buttons declared inline, listeners attached in JS after DOMContentLoaded -->
+<div class="section">
+  <div class="section-label">Date Range</div>
+  <div class="date-presets">
+    <button class="preset-btn active" id="btn-D-1">Yesterday</button>
+    <button class="preset-btn"        id="btn-D-7">Last 7d</button>
+    <button class="preset-btn"        id="btn-D-30">Last 30d</button>
+    <button class="preset-btn"        id="btn-custom">Custom</button>
+  </div>
+  <div class="date-row">
+    <input type="date" id="dateFrom" disabled>
+    <span class="date-sep">→</span>
+    <input type="date" id="dateTo"   disabled>
+  </div>
+</div>
+
+<!-- Schedule -->
+<div class="section">
+  <div class="section-label">Auto Schedule</div>
+  <div class="schedule-row">
+    <label class="toggle">
+      <input type="checkbox" id="schedToggle">
+      <span class="toggle-slider"></span>
+    </label>
+    <span class="toggle-label">Run daily at</span>
+    <div class="time-wrap">
+      <input type="time" id="schedTime" value="08:00">
+    </div>
+  </div>
+  <div class="next-run" id="nextRun"></div>
+</div>
+
+<div class="cta">
+  <button class="export-all-btn" id="exportBtn">
+    <span id="btnIcon">⬇</span>
+    <span id="btnText">Export All Brands Now</span>
+  </button>
+</div>
+<div class="log-strip" id="logStrip"></div>
+
+<script>
+// ─── Helpers ────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function isoDate(n=0){ const d=new Date(); d.setDate(d.getDate()-n); return d.toISOString().slice(0,10); }
+function log(msg, type=''){
+  const t = new Date().toLocaleTimeString('en-GB',{hour12:false});
+  $('logStrip').innerHTML = `<div class="log-entry ${type}">${t}  ${esc(msg)}</div>`;
+}
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let tabs = [];
+let statuses = {};
+let mode = 'D-1';
+
+// ─── Tab detection ───────────────────────────────────────────────────────────
+// Uses chrome.tabs.query which IS available in popup context (not content scripts)
+async function refreshTabs() {
+  try {
+    // Query all windows for Shopee seller tabs
+    const results = await chrome.tabs.query({ url: 'https://seller.shopee.co.th/*' });
+    tabs = results;
+    $('tabCount').textContent = tabs.length;
+    renderTabs();
+    if (tabs.length > 0) {
+      log(`Found ${tabs.length} Shopee tab(s) ✓`, 'ok');
+    } else {
+      log('No Shopee tabs open yet', 'warn');
+    }
+  } catch (err) {
+    // Fallback: show open button
+    tabs = [];
+    $('tabCount').textContent = '0';
+    $('tabList').innerHTML = `<div class="no-tabs">
+      Could not read tabs.<br>
+      <a id="openLink">Open Shopee Seller Center ↗</a>
+    </div>`;
+    $('openLink')?.addEventListener('click', () =>
+      chrome.tabs.create({ url: 'https://seller.shopee.co.th/portal/sale/order' })
+    );
+    log('Tab query failed: ' + err.message, 'err');
+  }
+}
+
+function renderTabs() {
+  const list = $('tabList');
+  if (!tabs.length) {
+    list.innerHTML = `<div class="no-tabs">
+      No Shopee seller tabs found.<br>
+      <a id="openLink">Open Shopee Seller Center ↗</a>
+    </div>`;
+    $('openLink')?.addEventListener('click', () =>
+      chrome.tabs.create({ url: 'https://seller.shopee.co.th/portal/sale/order' })
+    );
+    return;
+  }
+  list.innerHTML = tabs.map(t => {
+    const st = statuses[t.id] || 'idle';
+    const label = {idle:'Ready',running:'Exporting…',done:'Done ✓',error:'Error'}[st];
+    const title = (t.title||'').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i,'').trim() || 'Shopee Brand';
+    const path  = (t.url||'').replace('https://seller.shopee.co.th','') || '/';
+    return `<div class="tab-item">
+      <span class="tab-favicon">🛍</span>
+      <div class="tab-info">
+        <div class="tab-title" title="${esc(t.title)}">${esc(title)}</div>
+        <div class="tab-url">${esc(path)}</div>
+      </div>
+      <span class="tab-status ${st}" data-sid="${t.id}">${esc(label)}</span>
+      <button class="tab-btn" data-tid="${t.id}">Export</button>
+    </div>`;
+  }).join('');
+
+  // Attach per-tab export buttons
+  list.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tid = Number(btn.dataset.tid);
+      await saveSettings();
+      setStatus(tid, 'running');
+      btn.disabled = true;
+      log(`Exporting tab ${tid}…`);
+      chrome.runtime.sendMessage({ action: 'exportTab', tabId: tid }, () => {
+        setTimeout(() => { setStatus(tid, 'done'); btn.disabled = false; log('Export triggered ✓', 'ok'); }, 9000);
+      });
+    });
+  });
+}
+
+function setStatus(tabId, st) {
+  statuses[tabId] = st;
+  const el = document.querySelector(`.tab-status[data-sid="${tabId}"]`);
+  if (!el) return;
+  el.className = `tab-status ${st}`;
+  el.textContent = {idle:'Ready',running:'Exporting…',done:'Done ✓',error:'Error'}[st];
+}
+
+// ─── Preset buttons — direct listeners, no event delegation ─────────────────
+function selectMode(m) {
+  mode = m;
+  // Highlight correct button
+  ['D-1','D-7','D-30','custom'].forEach(id => {
+    const btn = $('btn-' + id);
+    if (btn) btn.classList.toggle('active', id === m);
+  });
+  // Update date inputs
+  const from = $('dateFrom'), to = $('dateTo');
+  if (m === 'custom') {
+    from.disabled = false; to.disabled = false;
+    if (!from.value) from.value = isoDate(7);
+    if (!to.value)   to.value   = isoDate(1);
+  } else {
+    const map = { 'D-1':[1,1], 'D-7':[7,1], 'D-30':[30,1] };
+    const [f, t_] = map[m] || [1,1];
+    from.value = isoDate(f); to.value = isoDate(t_);
+    from.disabled = true; to.disabled = true;
+  }
+  saveSettings();
+}
+
+// Attach listeners to each button individually after DOM is ready
+$('btn-D-1')   .addEventListener('click', () => selectMode('D-1'));
+$('btn-D-7')   .addEventListener('click', () => selectMode('D-7'));
+$('btn-D-30')  .addEventListener('click', () => selectMode('D-30'));
+$('btn-custom').addEventListener('click', () => selectMode('custom'));
+
+$('dateFrom').addEventListener('change', saveSettings);
+$('dateTo')  .addEventListener('change', saveSettings);
+
+// ─── Schedule ────────────────────────────────────────────────────────────────
+$('schedToggle').addEventListener('change', () => { saveSettings(); updateNextRun(); });
+$('schedTime')  .addEventListener('change', () => { saveSettings(); updateNextRun(); });
+
+function updateNextRun() {
+  const el = $('nextRun');
+  if (!$('schedToggle').checked) { el.textContent = ''; return; }
+  const [h,m] = $('schedTime').value.split(':').map(Number);
+  const next = new Date(); next.setHours(h,m,0,0);
+  if (next <= new Date()) next.setDate(next.getDate()+1);
+  el.innerHTML = `Next: <span>${next.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'})} ${$('schedTime').value}</span>`;
+}
+
+// ─── Settings persistence ────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const s = await chrome.storage.local.get(['dateMode','dateFrom','dateTo','scheduleEnabled','scheduleHour','scheduleMinute']);
+    mode = s.dateMode || 'D-1';
+    if (s.dateFrom) $('dateFrom').value = s.dateFrom;
+    if (s.dateTo)   $('dateTo').value   = s.dateTo;
+    selectMode(mode); // applies highlight + date values
+    $('schedToggle').checked = !!s.scheduleEnabled;
+    const h = String(s.scheduleHour   ?? 8).padStart(2,'0');
+    const m = String(s.scheduleMinute ?? 0).padStart(2,'0');
+    $('schedTime').value = `${h}:${m}`;
+    updateNextRun();
+  } catch(e) {
+    console.error('loadSettings error', e);
+  }
+}
+
+async function saveSettings() {
+  try {
+    const [h,m] = $('schedTime').value.split(':').map(Number);
+    await chrome.storage.local.set({
+      dateMode: mode,
+      dateFrom: $('dateFrom').value,
+      dateTo:   $('dateTo').value,
+      scheduleEnabled: $('schedToggle').checked,
+      scheduleHour: h, scheduleMinute: m
+    });
+    chrome.runtime.sendMessage({ action: 'syncAlarm' }).catch(()=>{});
+  } catch(e) {
+    console.error('saveSettings error', e);
+  }
+}
+
+// ─── Export All button ───────────────────────────────────────────────────────
+$('exportBtn').addEventListener('click', async () => {
+  if (!tabs.length) {
+    log('No Shopee tabs found. Open seller.shopee.co.th first.', 'err');
+    return;
+  }
+  await saveSettings();
+  const btn = $('exportBtn');
+  btn.disabled = true;
+  $('btnIcon').innerHTML = '<div class="spinner"></div>';
+  $('btnText').textContent = `Exporting ${tabs.length} brand(s)…`;
+  tabs.forEach(t => setStatus(t.id, 'running'));
+  log(`Starting export on ${tabs.length} tab(s)…`);
+
+  chrome.runtime.sendMessage({ action: 'exportNow' }, () => {
+    // Allow ~9 sec per tab for the automation to complete
+    setTimeout(() => {
+      tabs.forEach(t => { if (statuses[t.id] === 'running') setStatus(t.id, 'done'); });
+      btn.disabled = false;
+      $('btnIcon').textContent = '✓';
+      $('btnText').textContent = 'Export All Brands Now';
+      log(`Export complete on ${tabs.length} tab(s) ✓`, 'ok');
+      setTimeout(() => { $('btnIcon').textContent = '⬇'; }, 2500);
+    }, tabs.length * 9000);
+  });
+});
+
+// ─── Listen for status updates from background ───────────────────────────────
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action === 'tabProgress') setStatus(msg.tabId, msg.status);
+});
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+// DOMContentLoaded is already fired since we're at end of body,
+// but use it defensively anyway
+async function boot() {
+  await loadSettings();
+  await refreshTabs();
+}
+boot();
+
+// Refresh tab list when popup re-opens
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshTabs();
+});
+</script>
+</body>
+</html>
