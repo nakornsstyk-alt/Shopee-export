@@ -37,16 +37,16 @@ async function triggerExportOnAllTabs() {
   for (const tab of tabs) {
     if (!tab.url.includes('/sale/order')) {
       await chrome.tabs.update(tab.id, { url: 'https://seller.shopee.co.th/portal/sale/order' });
-      await sleep(3000);
+      await waitForTabLoad(tab.id);
     }
     try {
+      // Notify popup that this tab is starting
+      chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'running' }).catch(() => {});
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: shopeeExportFlow,
         args: [settings]
       });
-      // Notify popup of progress
-      chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'running' }).catch(() => {});
       await sleep(4000);
     } catch (e) {
       console.error('[Exporter] Tab', tab.id, e);
@@ -62,9 +62,10 @@ async function exportSingleTab(tabId) {
 
   if (!tab.url.includes('/sale/order')) {
     await chrome.tabs.update(tabId, { url: 'https://seller.shopee.co.th/portal/sale/order' });
-    await sleep(3000);
+    await waitForTabLoad(tabId);
   }
 
+  chrome.runtime.sendMessage({ action: 'tabProgress', tabId, status: 'running' }).catch(() => {});
   await chrome.scripting.executeScript({
     target: { tabId },
     func: shopeeExportFlow,
@@ -73,6 +74,25 @@ async function exportSingleTab(tabId) {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function waitForTabLoad(tabId, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error('Tab load timeout: ' + tabId));
+    }, timeoutMs);
+
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
 
 // ── Main injected automation function ──────────────────────────────────────
 // This function is serialised and injected into the Shopee tab — NO closures.
@@ -190,10 +210,12 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo }) {
   }
 
   async function run() {
-    // 1. Ensure we're on the orders page
+    // 1. Guard: background.js navigates to /sale/order before injecting this script.
+    // If somehow we end up on the wrong page, bail — location.href would destroy
+    // this script context immediately so there is nothing useful we can do here.
     if (!location.pathname.includes('/sale/order')) {
-      location.href = 'https://seller.shopee.co.th/portal/sale/order';
-      await sleep(4000);
+      console.warn('[OrderExporter] Wrong page, aborting:', location.pathname);
+      return;
     }
 
     // 2. Click Export button (real class confirmed via live inspection)
