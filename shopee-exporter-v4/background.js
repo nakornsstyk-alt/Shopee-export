@@ -32,6 +32,25 @@ function extractBrandFromTitle(title, platform) {
   return (title || '').trim();
 }
 
+// Read the shop name directly from an open Shopee tab's DOM (.subaccount-name).
+// Prefers a tab in the same window as the given windowId; falls back to any Shopee tab.
+// Returns null if no Shopee tab is available or the element isn't found.
+async function getBrandFromShopeeTab(windowId) {
+  const shopeeTabs = await chrome.tabs.query({ url: 'https://seller.shopee.co.th/*' });
+  if (!shopeeTabs.length) return null;
+  const tab = shopeeTabs.find(t => t.windowId === windowId) || shopeeTabs[0];
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => document.querySelector('.subaccount-name')?.textContent?.trim() || '',
+    });
+    return results?.[0]?.result || null;
+  } catch (e) {
+    console.warn('[Exporter] Could not read Shopee brand name:', e.message);
+    return null;
+  }
+}
+
 // Compute { from, to } date objects from stored settings
 function computeDateRange(settings) {
   const { dateMode, dateFrom, dateTo } = settings;
@@ -144,7 +163,14 @@ async function runExportOnTab(tab, platformKey, cfg, settings) {
     tab = await chrome.tabs.get(tab.id).catch(() => tab);
   }
 
-  const brand = extractBrandFromTitle(tab.title, platformKey) || platformKey + 'Export';
+  // Lazada tab titles contain the page section name, not the shop name.
+  // Read the real shop name from a Shopee tab in the same window instead.
+  let brand;
+  if (platformKey === 'lazada') {
+    brand = (await getBrandFromShopeeTab(tab.windowId)) || extractBrandFromTitle(tab.title, platformKey) || 'LazadaExport';
+  } else {
+    brand = extractBrandFromTitle(tab.title, platformKey) || platformKey + 'Export';
+  }
 
   // Pre-compute date fragment so onDeterminingFilename can use it for Lazada renames
   const { from, to } = computeDateRange(settings);
@@ -615,13 +641,16 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
   // Click the cell for `day` inside the given panel (left or right).
   // Skips cells that overflow from the previous/next month.
   function clickDateInPanel(panelSelector, day) {
+    const target = String(day);
     const cells = document.querySelectorAll(`${panelSelector} .next-calendar-cell`);
     for (const cell of cells) {
-      const cls = cell.className;
-      if (cls.includes('prev-month') || cls.includes('next-month')) continue;
-      const dateEl = cell.querySelector('.next-calendar-date');
-      if (dateEl && dateEl.textContent.trim() === String(day)) {
-        fireClick(cell);
+      const cls = String(cell.className);
+      if (cls.includes('prev-month') || cls.includes('next-month') || cls.includes('disabled')) continue;
+      // Prefer clicking the inner date element; fall back to the cell itself
+      const inner = cell.querySelector('.next-calendar-date, [class*="calendar-date"]');
+      const clickTarget = inner || cell;
+      if (clickTarget.textContent.trim() === target) {
+        fireClick(clickTarget);
         return true;
       }
     }
@@ -723,7 +752,19 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
       return false;
     }
     fireClick(exportAllItem);
-    console.log('[OrderExporter-Lazada] Export All triggered ✓');
+    await sleep(800);
+
+    // Lazada shows a confirmation dialog: "Are you sure to export all orders"
+    // Click "ยืนยัน" (Confirm) button to proceed
+    const confirmBtn = [...document.querySelectorAll('button')]
+      .find(b => b.textContent.trim() === 'ยืนยัน');
+    if (confirmBtn) {
+      fireClick(confirmBtn);
+      console.log('[OrderExporter-Lazada] Export confirmed ✓');
+    } else {
+      console.warn('[OrderExporter-Lazada] Confirmation dialog (ยืนยัน) not found — dialog may not have appeared yet');
+    }
+
     // Lazada download is immediate — onDeterminingFilename handles rename
     return true;
   }
