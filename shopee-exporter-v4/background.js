@@ -134,9 +134,11 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
   // Shopee seller center shows the shop name in the navigation header.
   function getShopNameFromDOM() {
     const selectors = [
+      '.subaccount-name',                                          // confirmed Shopee selector
       '[class*="shop-name"]', '[class*="shopName"]', '[class*="shop_name"]',
       '[class*="store-name"]', '[class*="storeName"]', '[class*="store_name"]',
       '[class*="seller-name"]', '[class*="sellerName"]', '[class*="seller_name"]',
+      '[class*="subaccount"]', '[class*="account-name"]',
       '.nav-logo__text', '.header-account__name',
     ];
     for (const sel of selectors) {
