@@ -525,17 +525,13 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
 }
 
 // ── Lazada export flow ───────────────────────────────────────────────────────
-// Skeleton — selectors TBD after live DOM inspection of sellercenter.lazada.co.th
-// Run the following in the Lazada console to find selectors:
-//
-//   document.querySelectorAll('button').forEach(b => console.log(b.textContent.trim(), b.className));
-//   document.querySelectorAll('[class*=shop],[class*=store],[class*=brand],[class*=seller]')
-//     .forEach(e => { const t=e.textContent.trim(); if(t.length>2&&t.length<60&&!e.children.length) console.log(e.tagName,e.className,t); });
-//
+// Serialised and injected into the Lazada tab — NO closures from background scope.
+// Selectors confirmed via live DOM inspection (Alibaba Fusion "next" component library).
 function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName }) {
 
-  let effectiveBrand = brandName || 'LazadaExport';
-  const platform = platformName || 'Lazada'; // eslint-disable-line no-unused-vars
+  // Shop name is not exposed in the Lazada DOM; use the tab-title-derived brandName.
+  const effectiveBrand = brandName || 'LazadaExport';
+  void platformName; // passed through to onDeterminingFilename via storage
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -576,18 +572,160 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
     return { from: offset(1), to: offset(1) };
   }
 
-  function getShopNameFromDOM() {
-    // TODO: update selectors after live DOM inspection
-    const selectors = [
-      '[class*="shop-name"]', '[class*="shopName"]',
-      '[class*="store-name"]', '[class*="storeName"]',
-      '[class*="seller-name"]', '[class*="sellerName"]',
-    ];
-    for (const sel of selectors) {
-      const text = document.querySelector(sel)?.textContent?.trim();
-      if (text && text.length >= 2 && text.length <= 60) return text;
+  // Lazada calendar uses Thai month names (Alibaba Fusion "next" component library)
+  const THAI_MONTHS = [
+    'มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
+    'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'
+  ];
+
+  // Read the month/year currently shown in the LEFT calendar panel.
+  // Left panel header has two buttons: [0] = Thai month name, [1] = year number.
+  function getLeftPanelMonth() {
+    const header = document.querySelector('.next-calendar-panel-header-left');
+    if (!header) return null;
+    const btns      = [...header.querySelectorAll('button')];
+    const monthText = btns[0]?.textContent?.trim();
+    const yearText  = btns[1]?.textContent?.trim();
+    const monthIdx  = THAI_MONTHS.indexOf(monthText);
+    const year      = parseInt(yearText, 10);
+    if (monthIdx < 0 || isNaN(year)) return null;
+    return { month: monthIdx + 1, year };
+  }
+
+  // Navigate the two-panel range picker until the left panel shows targetYear/targetMonth.
+  async function navigateToLeftMonth(targetYear, targetMonth) {
+    for (let i = 0; i < 24; i++) {
+      const cur = getLeftPanelMonth();
+      if (!cur) { await sleep(300); continue; }
+      const diff = (targetYear - cur.year) * 12 + (targetMonth - cur.month);
+      if (diff === 0) return;
+      if (diff < 0) {
+        const btn = document.querySelector('.next-calendar-panel-header-left .next-calendar-btn-prev-month')
+                 || document.querySelector('.next-calendar-btn-prev-month');
+        if (btn) fireClick(btn);
+      } else {
+        const btn = document.querySelector('.next-calendar-panel-header-right .next-calendar-btn-next-month')
+                 || document.querySelector('.next-calendar-btn-next-month');
+        if (btn) fireClick(btn);
+      }
+      await sleep(400);
     }
-    return '';
+  }
+
+  // Click the cell for `day` inside the given panel (left or right).
+  // Skips cells that overflow from the previous/next month.
+  function clickDateInPanel(panelSelector, day) {
+    const cells = document.querySelectorAll(`${panelSelector} .next-calendar-cell`);
+    for (const cell of cells) {
+      const cls = cell.className;
+      if (cls.includes('prev-month') || cls.includes('next-month')) continue;
+      const dateEl = cell.querySelector('.next-calendar-date');
+      if (dateEl && dateEl.textContent.trim() === String(day)) {
+        fireClick(cell);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function setDateRange(from, to) {
+    // 1. Click "กำหนดเอง" (Custom) tag to reveal the date-range picker
+    const customTag = [...document.querySelectorAll('.next-tag-checkable')].find(el =>
+      (el.querySelector('.next-tag-body') || el).textContent.trim().includes('กำหนดเอง')
+    );
+    if (!customTag) {
+      console.warn('[OrderExporter-Lazada] Custom date tag not found');
+      return false;
+    }
+    fireClick(customTag);
+    await sleep(600);
+
+    // 2. Click the range-picker trigger to open the calendar
+    const trigger = document.querySelector('.next-range-picker-trigger');
+    if (!trigger) {
+      console.warn('[OrderExporter-Lazada] Date range trigger not found');
+      return false;
+    }
+    fireClick(trigger);
+    await waitFor('.next-calendar-range', 5000).catch(() =>
+      console.warn('[OrderExporter-Lazada] Calendar did not open in time')
+    );
+    await sleep(400);
+
+    // 3. Navigate left panel to FROM month
+    await navigateToLeftMonth(from.year, from.month);
+    await sleep(400);
+
+    // 4. Click FROM date in left panel
+    if (!clickDateInPanel('.next-calendar-body-left', from.day)) {
+      console.warn('[OrderExporter-Lazada] FROM date cell not found:', from);
+    }
+    await sleep(400);
+
+    // 5. Click TO date
+    // After clicking FROM, left panel = FROM month, right panel = FROM month + 1.
+    // For TO in the same month as FROM → click in left panel.
+    // For TO one month ahead          → click in right panel (already visible).
+    // For TO N months ahead (N > 1)   → advance (N-1) more times, then click in right panel.
+    const fromOrdinal = from.year * 12 + from.month;
+    const toOrdinal   = to.year   * 12 + to.month;
+    const diff        = toOrdinal - fromOrdinal;
+
+    if (diff === 0) {
+      // Same month as FROM — use left panel
+      if (!clickDateInPanel('.next-calendar-body-left', to.day)) {
+        console.warn('[OrderExporter-Lazada] TO date cell not found in left panel:', to);
+      }
+    } else {
+      // Advance until right panel shows TO month (right = left + 1, so advance diff-1 extra times)
+      for (let i = 0; i < diff - 1; i++) {
+        const btn = document.querySelector('.next-calendar-panel-header-right .next-calendar-btn-next-month')
+                 || document.querySelector('.next-calendar-btn-next-month');
+        if (btn) fireClick(btn);
+        await sleep(400);
+      }
+      if (!clickDateInPanel('.next-calendar-body-right', to.day)) {
+        console.warn('[OrderExporter-Lazada] TO date cell not found in right panel:', to);
+      }
+    }
+    await sleep(400);
+
+    // 6. Click the confirm button "กำหนด"
+    const footer = document.querySelector('.next-date-picker-panel-footer');
+    const confirmBtn = footer
+      ? [...footer.querySelectorAll('button')].find(b => b.textContent.trim() === 'กำหนด')
+      : [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'กำหนด');
+    if (confirmBtn) {
+      fireClick(confirmBtn);
+      console.log('[OrderExporter-Lazada] Date range confirmed ✓');
+    } else {
+      console.warn('[OrderExporter-Lazada] Confirm button (กำหนด) not found');
+    }
+    await sleep(800);
+    return true;
+  }
+
+  async function triggerExport() {
+    // Open the "ส่งออก" (Export) split-button menu
+    const menuBtn = document.querySelector('button.next-menu-btn');
+    if (!menuBtn) {
+      console.warn('[OrderExporter-Lazada] Export menu button not found');
+      return false;
+    }
+    fireClick(menuBtn);
+    await sleep(600);
+
+    // Click "Export All" from the dropdown
+    const exportAllItem = [...document.querySelectorAll('.next-menu-item')]
+      .find(el => el.textContent.trim().includes('Export All'));
+    if (!exportAllItem) {
+      console.warn('[OrderExporter-Lazada] "Export All" menu item not found');
+      return false;
+    }
+    fireClick(exportAllItem);
+    console.log('[OrderExporter-Lazada] Export All triggered ✓');
+    // Lazada download is immediate — onDeterminingFilename handles rename
+    return true;
   }
 
   async function run() {
@@ -596,18 +734,17 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
       return;
     }
 
-    const domBrand = getShopNameFromDOM();
-    if (domBrand) {
-      effectiveBrand = domBrand;
-      chrome.storage.local.set({ pendingDownloadBrand: domBrand });
-      console.log('[OrderExporter-Lazada] Brand from DOM:', domBrand);
+    console.log('[OrderExporter-Lazada] Starting export for brand:', effectiveBrand);
+
+    const { from, to } = getTargetDates();
+    const ok = await setDateRange(from, to);
+    if (!ok) {
+      console.warn('[OrderExporter-Lazada] Failed to set date range — aborting');
+      return;
     }
 
-    // TODO: implement after DOM inspection confirms:
-    //   - date range input selectors
-    //   - export button selector
-    //   - whether download is immediate or queued
-    console.warn('[OrderExporter-Lazada] Flow not yet implemented — needs DOM inspection');
+    await sleep(500);
+    await triggerExport();
   }
 
   run().catch(e => console.error('[OrderExporter-Lazada] Error:', e.message));
