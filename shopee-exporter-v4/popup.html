@@ -41,7 +41,7 @@
   .no-tabs a{color:var(--accent);cursor:pointer;text-decoration:none}
 
   /* ── Preset buttons — each gets its own listener, no delegation ── */
-  .date-presets{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .date-presets{display:flex;gap:6px;flex-wrap:nowrap;margin-bottom:10px}
   .preset-btn{
     padding:5px 12px;border-radius:20px;
     border:1px solid var(--border);background:var(--surface);
@@ -178,9 +178,22 @@ let mode = 'D-1';
 // ─── Tab detection ───────────────────────────────────────────────────────────
 // Uses chrome.tabs.query which IS available in popup context (not content scripts)
 async function refreshTabs() {
+  // Safety net: if chrome.tabs.query never settles, clear Loading after 5 s
+  const fallbackTimer = setTimeout(() => {
+    if ($('tabList').querySelector('.no-tabs')?.textContent.includes('Loading')) {
+      $('tabList').innerHTML = `<div class="no-tabs">
+        Could not load tabs.<br>
+        <a id="openLink">Open Shopee Seller Center ↗</a>
+      </div>`;
+      $('openLink')?.addEventListener('click', () =>
+        chrome.tabs.create({ url: 'https://seller.shopee.co.th/portal/sale/order' })
+      );
+    }
+  }, 5000);
   try {
     // Query all windows for Shopee seller tabs
     const results = await chrome.tabs.query({ url: 'https://seller.shopee.co.th/*' });
+    clearTimeout(fallbackTimer);
     tabs = results;
     $('tabCount').textContent = tabs.length;
     renderTabs();
@@ -190,6 +203,7 @@ async function refreshTabs() {
       log('No Shopee tabs open yet', 'warn');
     }
   } catch (err) {
+    clearTimeout(fallbackTimer);
     // Fallback: show open button
     tabs = [];
     $('tabCount').textContent = '0';
@@ -278,19 +292,6 @@ function selectMode(m) {
   saveSettings();
 }
 
-// Attach listeners to each button individually after DOM is ready
-$('btn-D-1')   .addEventListener('click', () => selectMode('D-1'));
-$('btn-D-7')   .addEventListener('click', () => selectMode('D-7'));
-$('btn-D-30')  .addEventListener('click', () => selectMode('D-30'));
-$('btn-custom').addEventListener('click', () => selectMode('custom'));
-
-$('dateFrom').addEventListener('change', saveSettings);
-$('dateTo')  .addEventListener('change', saveSettings);
-
-// ─── Schedule ────────────────────────────────────────────────────────────────
-$('schedToggle').addEventListener('change', () => { saveSettings(); updateNextRun(); });
-$('schedTime')  .addEventListener('change', () => { saveSettings(); updateNextRun(); });
-
 function updateNextRun() {
   const el = $('nextRun');
   if (!$('schedToggle').checked) { el.textContent = ''; return; }
@@ -334,50 +335,67 @@ async function saveSettings() {
   }
 }
 
-// ─── Export All button ───────────────────────────────────────────────────────
-$('exportBtn').addEventListener('click', async () => {
-  if (!tabs.length) {
-    log('No Shopee tabs found. Open seller.shopee.co.th first.', 'err');
-    return;
-  }
-  await saveSettings();
-  const btn = $('exportBtn');
-  btn.disabled = true;
-  $('btnIcon').innerHTML = '<div class="spinner"></div>';
-  $('btnText').textContent = `Exporting ${tabs.length} brand(s)…`;
-  tabs.forEach(t => setStatus(t.id, 'running'));
-  log(`Starting export on ${tabs.length} tab(s)…`);
-
-  chrome.runtime.sendMessage({ action: 'exportNow' }, () => {
-    // Allow ~9 sec per tab for the automation to complete
-    setTimeout(() => {
-      tabs.forEach(t => { if (statuses[t.id] === 'running') setStatus(t.id, 'done'); });
-      btn.disabled = false;
-      $('btnIcon').textContent = '✓';
-      $('btnText').textContent = 'Export All Brands Now';
-      log(`Export complete on ${tabs.length} tab(s) ✓`, 'ok');
-      setTimeout(() => { $('btnIcon').textContent = '⬇'; }, 2500);
-    }, tabs.length * 9000);
-  });
-});
-
-// ─── Listen for status updates from background ───────────────────────────────
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === 'tabProgress') setStatus(msg.tabId, msg.status);
-});
-
-// ─── Boot ────────────────────────────────────────────────────────────────────
-// DOMContentLoaded is already fired since we're at end of body,
-// but use it defensively anyway
 async function boot() {
   await loadSettings();
   await refreshTabs();
 }
-boot();
 
-// Refresh tab list when popup re-opens
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) refreshTabs();
+// ─── Init: attach all listeners and boot inside DOMContentLoaded ─────────────
+document.addEventListener('DOMContentLoaded', () => {
+
+  // Preset buttons
+  $('btn-D-1')   .addEventListener('click', () => selectMode('D-1'));
+  $('btn-D-7')   .addEventListener('click', () => selectMode('D-7'));
+  $('btn-D-30')  .addEventListener('click', () => selectMode('D-30'));
+  $('btn-custom').addEventListener('click', () => selectMode('custom'));
+
+  $('dateFrom').addEventListener('change', saveSettings);
+  $('dateTo')  .addEventListener('change', saveSettings);
+
+  // ─── Schedule ──────────────────────────────────────────────────────────────
+  $('schedToggle').addEventListener('change', () => { saveSettings(); updateNextRun(); });
+  $('schedTime')  .addEventListener('change', () => { saveSettings(); updateNextRun(); });
+
+  // ─── Export All button ─────────────────────────────────────────────────────
+  $('exportBtn').addEventListener('click', async () => {
+    if (!tabs.length) {
+      log('No Shopee tabs found. Open seller.shopee.co.th first.', 'err');
+      return;
+    }
+    await saveSettings();
+    const btn = $('exportBtn');
+    btn.disabled = true;
+    $('btnIcon').innerHTML = '<div class="spinner"></div>';
+    $('btnText').textContent = `Exporting ${tabs.length} brand(s)…`;
+    tabs.forEach(t => setStatus(t.id, 'running'));
+    log(`Starting export on ${tabs.length} tab(s)…`);
+
+    chrome.runtime.sendMessage({ action: 'exportNow' }, () => {
+      // Allow ~9 sec per tab for the automation to complete
+      setTimeout(() => {
+        tabs.forEach(t => { if (statuses[t.id] === 'running') setStatus(t.id, 'done'); });
+        btn.disabled = false;
+        $('btnIcon').textContent = '✓';
+        $('btnText').textContent = 'Export All Brands Now';
+        log(`Export complete on ${tabs.length} tab(s) ✓`, 'ok');
+        setTimeout(() => { $('btnIcon').textContent = '⬇'; }, 2500);
+      }, tabs.length * 9000);
+    });
+  });
+
+  // ─── Listen for status updates from background ─────────────────────────────
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.action === 'tabProgress') setStatus(msg.tabId, msg.status);
+  });
+
+  // Boot
+  boot();
+
+  // Refresh tab list when popup re-opens
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshTabs();
+  });
+
 });
 </script>
 </body>
