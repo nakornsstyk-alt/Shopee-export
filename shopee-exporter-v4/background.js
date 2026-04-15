@@ -135,13 +135,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     );
   }
 
-  // Find a button/anchor by visible text
-  function findByText(text, selector = 'button, a, [role="tab"], [role="button"]') {
-    return [...document.querySelectorAll(selector)].find(el =>
-      el.textContent.trim().toLowerCase().includes(text.toLowerCase())
-    );
-  }
-
   // Wait for a selector to appear in DOM
   function waitFor(selector, timeout = 12000) {
     return new Promise((resolve, reject) => {
@@ -274,20 +267,12 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     }
   }
 
-  // After the export modal is confirmed, navigate to Export History, poll for
-  // the generated file, then trigger the download with a custom filename.
+  // After the export modal is confirmed, the "Latest Reports" panel appears
+  // automatically — no button click needed to open it. Poll until the entry for
+  // our date range shows an enabled Download button, then click it.
+  // onDeterminingFilename (in the service worker) will rename the file.
   async function waitAndDownload(from, to) {
-    await sleep(2000); // let the modal close
-
-    // Open Export History panel
-    const histBtn = findByText('Export History') || findByText('History');
-    if (histBtn) {
-      fireClick(histBtn);
-      await sleep(1500);
-    } else {
-      console.warn('[OrderExporter] Export History button not found — skipping auto-download');
-      return;
-    }
+    await sleep(1500); // brief pause for modal to close and panel to render
 
     function pad(n) { return String(n).padStart(2, '0'); }
     const fromStr = `${from.year}${pad(from.month)}${pad(from.day)}`;
@@ -299,45 +284,39 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     const deadline = Date.now() + 3 * 60 * 1000; // wait up to 3 minutes
     while (Date.now() < deadline) {
 
-      // Strategy 1: anchor with our date fragment in href
-      const anchor = [...document.querySelectorAll('a[href]')].find(a =>
-        a.href.includes(fragment)
-      );
-      if (anchor) {
-        console.log('[OrderExporter] Downloading via link:', anchor.href);
-        chrome.runtime.sendMessage({
-          action: 'downloadExport',
-          url: anchor.href,
-          filename: desiredFilename
-        });
-        return;
-      }
-
-      // Strategy 2: row whose text contains our fragment + has a download button
+      // Look for rows/items whose text contains our date fragment
       const rows = [...document.querySelectorAll('tr, li, [class*="item"], [class*="row"], [class*="record"]')];
       for (const row of rows) {
         if (!row.textContent.includes(fragment)) continue;
-        const dlEl = row.querySelector('a[href], button');
-        if (!dlEl) continue;
-        if (dlEl.tagName === 'A' && dlEl.href) {
-          console.log('[OrderExporter] Downloading via row link');
+
+        // Prefer an anchor with a direct download URL (most controlled rename)
+        const anchor = row.querySelector('a[href]');
+        if (anchor && anchor.href && !anchor.disabled) {
+          console.log('[OrderExporter] Downloading via link for', fragment);
           chrome.runtime.sendMessage({
             action: 'downloadExport',
-            url: dlEl.href,
+            url: anchor.href,
             filename: desiredFilename
           });
-        } else {
-          // No URL — just click the button; onDeterminingFilename will rename it
-          console.log('[OrderExporter] Clicking row download button');
-          fireClick(dlEl);
+          return;
         }
-        return;
+
+        // Otherwise find an enabled Download button (orange = enabled, grey = still processing)
+        const dlBtn = [...row.querySelectorAll('button')].find(b =>
+          b.textContent.trim().toLowerCase().includes('download') && !b.disabled
+        );
+        if (dlBtn) {
+          console.log('[OrderExporter] Clicking Download button for', fragment);
+          fireClick(dlBtn); // onDeterminingFilename will rename the resulting file
+          return;
+        }
+        // Button exists but is still disabled/grey — keep polling
       }
 
       await sleep(5000);
     }
 
-    console.warn('[OrderExporter] Timed out waiting for export file in history');
+    console.warn('[OrderExporter] Timed out waiting for Download button for', fragment);
   }
 
   async function run() {
