@@ -196,7 +196,9 @@ async function runExportOnTab(tab, platformKey, cfg, settings) {
 }
 
 // ── Auto-rename downloads ────────────────────────────────────────────────────
-// Shopee: filename matches known pattern → rename directly from it.
+// Shopee: filename matches a known pattern — platform is always 'Shopee', date
+//         is extracted from the filename itself.  No storage lookup needed, and
+//         no race condition when Lazada clears pendingDownloadPlatform first.
 // Lazada: filename is a random 32-char hex hash → rename using stored context.
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   const basename = item.filename.split(/[/\\]/).pop();
@@ -211,18 +213,17 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       const brand = (pendingDownloadBrand || 'Export')
         .replace(/[/\\?%*:|"<>]/g, '_').trim() || 'Export';
 
-      // Platform display name for filename prefix (Shopee / Lazada / TikTok …)
-      const PLATFORM_DISPLAY = { shopee: 'Shopee', lazada: 'Lazada', tiktok: 'TikTok' };
-      const platformDisplay = PLATFORM_DISPLAY[pendingDownloadPlatform] || 'Export';
-
       if (isShopeeExport) {
+        // Platform is always Shopee — identified unambiguously by filename pattern.
+        // Do NOT read pendingDownloadPlatform here: Shopee downloads take minutes
+        // and Lazada may have overwritten/cleared that key in the meantime.
         const match = basename.match(/(\d{8}_\d{8})\.xlsx$/i);
         const datePart = match ? match[1] : 'unknown';
-        suggest({ filename: `${platformDisplay}_${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
+        suggest({ filename: `Shopee_${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
 
       } else if (isLazadaExport && pendingDownloadPlatform === 'lazada') {
         const datePart = pendingDownloadDateFragment || 'unknown';
-        suggest({ filename: `${platformDisplay}_${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
+        suggest({ filename: `Lazada_${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
         // Clear platform flag to avoid accidentally renaming other xlsx files
         chrome.storage.local.remove('pendingDownloadPlatform');
       }
