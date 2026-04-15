@@ -125,7 +125,27 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 // Serialised and injected into the Shopee tab — NO closures allowed.
 function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
 
+  // Will be overridden with the actual shop name read from the page DOM.
+  let effectiveBrand = brandName || 'ShopeeExport';
+
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // Try to read the actual shop/store name from the page DOM.
+  // Shopee seller center shows the shop name in the navigation header.
+  function getShopNameFromDOM() {
+    const selectors = [
+      '[class*="shop-name"]', '[class*="shopName"]', '[class*="shop_name"]',
+      '[class*="store-name"]', '[class*="storeName"]', '[class*="store_name"]',
+      '[class*="seller-name"]', '[class*="sellerName"]', '[class*="seller_name"]',
+      '.nav-logo__text', '.header-account__name',
+    ];
+    for (const sel of selectors) {
+      const text = document.querySelector(sel)?.textContent?.trim();
+      // Require 2–60 chars to avoid matching empty or page-wide blobs
+      if (text && text.length >= 2 && text.length <= 60) return text;
+    }
+    return '';
+  }
 
   // Dispatch real mouse events so React synthetic handlers fire
   function fireClick(el) {
@@ -279,32 +299,31 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     const fromStr = `${from.year}${pad(from.month)}${pad(from.day)}`;
     const toStr   = `${to.year}${pad(to.month)}${pad(to.day)}`;
     const fragment = `${fromStr}_${toStr}`;
-    const safeBrand = (brandName || 'ShopeeExport').replace(/[/\\?%*:|"<>]/g, '_');
+    const safeBrand = effectiveBrand.replace(/[/\\?%*:|"<>]/g, '_');
     const desiredFilename = `${safeBrand}_${fragment}.xlsx`;
 
-    // Walk text nodes to find the one containing our fragment, then climb the DOM
-    // to find a sibling/ancestor Download button. This works regardless of whatever
-    // class names Shopee uses on the report list rows.
+    // Find an enabled "Download" button (exact text, not "Downloaded") whose
+    // ancestor also contains our date fragment. Walk UP from the button itself
+    // so we never accidentally reach a container that holds unrelated rows.
     function findDownloadBtn() {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-      let node;
-      while ((node = walker.nextNode())) {
-        if (!node.textContent.includes(fragment)) continue;
-        // Found the text node — walk up looking for a container with a Download button
-        let el = node.parentElement;
+      // Exact-match: "Download" only, never "Downloaded" or "Downloading"
+      const isDownloadBtn = (b) =>
+        b.textContent.trim().toLowerCase() === 'download' && !b.disabled;
+
+      for (const btn of document.querySelectorAll('button')) {
+        if (!isDownloadBtn(btn)) continue;
+        // Walk up from this button — does any ancestor contain our fragment?
+        let el = btn.parentElement;
         for (let depth = 0; depth < 8 && el; depth++, el = el.parentElement) {
-          // Check for an enabled Download button
-          const btn = [...el.querySelectorAll('button')].find(b =>
-            /download/i.test(b.textContent.trim()) && !b.disabled
-          );
-          if (btn) return btn;
-          // Also check for a direct download anchor
-          const anchor = [...el.querySelectorAll('a[href]')].find(a =>
-            a.href && !a.disabled
-          );
-          if (anchor) return anchor;
+          if (el.textContent.includes(fragment)) return btn;
         }
       }
+
+      // Fallback: direct anchor href containing the fragment
+      for (const anchor of document.querySelectorAll('a[href]')) {
+        if (anchor.href.includes(fragment) && !anchor.disabled) return anchor;
+      }
+
       return null;
     }
 
@@ -337,6 +356,15 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     if (!location.pathname.includes('/sale/order')) {
       console.warn('[OrderExporter] Wrong page, aborting:', location.pathname);
       return;
+    }
+
+    // Override brand name with the actual shop name shown in the page DOM.
+    // This is more reliable than deriving it from the tab title.
+    const domBrand = getShopNameFromDOM();
+    if (domBrand) {
+      effectiveBrand = domBrand;
+      chrome.storage.local.set({ pendingDownloadBrand: domBrand });
+      console.log('[OrderExporter] Brand from DOM:', domBrand);
     }
 
     // 1. Click the Export button
