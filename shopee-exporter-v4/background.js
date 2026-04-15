@@ -1,4 +1,4 @@
-// background.js v3 — uses real Shopee selectors discovered via live inspection
+// background.js v4 — real mouse events, Export History auto-download, file rename
 
 // ── Alarm scheduler ────────────────────────────────────────────────────────
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -33,19 +33,22 @@ async function triggerExportOnAllTabs() {
   const settings = await chrome.storage.local.get(['dateMode', 'dateFrom', 'dateTo']);
   const tabs = await chrome.tabs.query({ url: 'https://seller.shopee.co.th/*' });
 
-  // Make sure all tabs are on the orders page first
   for (const tab of tabs) {
     if (!tab.url.includes('/sale/order')) {
       await chrome.tabs.update(tab.id, { url: 'https://seller.shopee.co.th/portal/sale/order' });
       await waitForTabLoad(tab.id);
     }
+
+    // Store brand name so onDeterminingFilename can rename the download
+    const brand = (tab.title || '').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i, '').trim() || 'ShopeeExport';
+    await chrome.storage.local.set({ pendingDownloadBrand: brand });
+
     try {
-      // Notify popup that this tab is starting
       chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'running' }).catch(() => {});
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: shopeeExportFlow,
-        args: [settings]
+        args: [{ ...settings, brandName: brand }]
       });
       await sleep(4000);
     } catch (e) {
@@ -57,7 +60,7 @@ async function triggerExportOnAllTabs() {
 
 async function exportSingleTab(tabId) {
   const settings = await chrome.storage.local.get(['dateMode', 'dateFrom', 'dateTo']);
-  const [tab] = await chrome.tabs.get(tabId).then(t => [t]).catch(() => [null]);
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab) return;
 
   if (!tab.url.includes('/sale/order')) {
@@ -65,11 +68,14 @@ async function exportSingleTab(tabId) {
     await waitForTabLoad(tabId);
   }
 
+  const brand = (tab.title || '').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i, '').trim() || 'ShopeeExport';
+  await chrome.storage.local.set({ pendingDownloadBrand: brand });
+
   chrome.runtime.sendMessage({ action: 'tabProgress', tabId, status: 'running' }).catch(() => {});
   await chrome.scripting.executeScript({
     target: { tabId },
     func: shopeeExportFlow,
-    args: [settings]
+    args: [{ ...settings, brandName: brand }]
   });
 }
 
@@ -94,11 +100,47 @@ function waitForTabLoad(tabId, timeoutMs = 15000) {
   });
 }
 
+// ── Auto-rename Shopee exports on download ─────────────────────────────────
+// Fires before the file is saved — lets us rename without touching the file system.
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  if (!/Order\.all\.order_creation_date\.\d{8}_\d{8}\.xlsx$/i.test(item.filename)) {
+    return; // not a Shopee order export — leave filename as-is
+  }
+
+  chrome.storage.local.get('pendingDownloadBrand', ({ pendingDownloadBrand }) => {
+    const brand = (pendingDownloadBrand || 'ShopeeExport')
+      .replace(/[/\\?%*:|"<>]/g, '_') // strip filesystem-unsafe chars
+      .trim() || 'ShopeeExport';
+
+    const match = item.filename.match(/(\d{8}_\d{8})\.xlsx$/i);
+    const datePart = match ? match[1] : 'unknown';
+
+    suggest({ filename: `${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
+  });
+
+  return true; // signal that suggest() will be called asynchronously
+});
+
 // ── Main injected automation function ──────────────────────────────────────
-// This function is serialised and injected into the Shopee tab — NO closures.
-function shopeeExportFlow({ dateMode, dateFrom, dateTo }) {
+// Serialised and injected into the Shopee tab — NO closures allowed.
+function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // Dispatch real mouse events so React synthetic handlers fire
+  function fireClick(el) {
+    if (!el) return;
+    ['mousedown', 'mouseup', 'click'].forEach(type =>
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }))
+    );
+  }
+
+  // Find a button/anchor by visible text
+  function findByText(text, selector = 'button, a, [role="tab"], [role="button"]') {
+    return [...document.querySelectorAll(selector)].find(el =>
+      el.textContent.trim().toLowerCase().includes(text.toLowerCase())
+    );
+  }
 
   // Wait for a selector to appear in DOM
   function waitFor(selector, timeout = 12000) {
@@ -114,7 +156,7 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo }) {
     });
   }
 
-  // Get target dates as { year, month (1-12), day } objects
+  // Build { year, month(1-12), day } from date string or day-offset
   function getTargetDates() {
     function parse(str) {
       const d = new Date(str);
@@ -125,19 +167,19 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo }) {
       d.setDate(d.getDate() - days);
       return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
     }
-    if (dateMode === 'D-1')   return { from: offset(1),  to: offset(1) };
-    if (dateMode === 'D-7')   return { from: offset(7),  to: offset(1) };
-    if (dateMode === 'D-30')  return { from: offset(30), to: offset(1) };
+    if (dateMode === 'D-1')  return { from: offset(1),  to: offset(1) };
+    if (dateMode === 'D-7')  return { from: offset(7),  to: offset(1) };
+    if (dateMode === 'D-30') return { from: offset(30), to: offset(1) };
     if (dateMode === 'custom' && dateFrom && dateTo) return { from: parse(dateFrom), to: parse(dateTo) };
     return { from: offset(1), to: offset(1) };
   }
 
-  // Get the month/year currently displayed on the LEFT calendar panel
+  // Read the month/year shown on the LEFT calendar panel
   function getDisplayedMonth() {
     const headers = [...document.querySelectorAll('.eds-picker-header__label.clickable')];
-    // First two labels = left panel (month, year)
     if (headers.length >= 2) {
-      const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const monthNames = ['January','February','March','April','May','June','July',
+                          'August','September','October','November','December'];
       const monthText = headers[0].textContent.trim();
       const yearText  = headers[1].textContent.trim();
       return { month: monthNames.indexOf(monthText) + 1, year: parseInt(yearText) };
@@ -145,112 +187,176 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo }) {
     return null;
   }
 
-  // Click the prev-month arrow on the left panel
   function clickPrev() {
-    const prevBtns = [...document.querySelectorAll('.eds-picker-header__prev:not(.disabled)')];
-    if (prevBtns.length) { prevBtns[0].click(); return true; }
+    const btns = [...document.querySelectorAll('.eds-picker-header__prev:not(.disabled)')];
+    if (btns.length) { fireClick(btns[0]); return true; }
     return false;
   }
 
-  // Click the next-month arrow on the right panel
   function clickNext() {
-    const nextBtns = [...document.querySelectorAll('.eds-picker-header__next:not(.disabled)')];
-    if (nextBtns.length) { nextBtns[nextBtns.length - 1].click(); return true; }
+    const btns = [...document.querySelectorAll('.eds-picker-header__next:not(.disabled)')];
+    if (btns.length) { fireClick(btns[btns.length - 1]); return true; }
     return false;
   }
 
-  // Navigate calendar so that target month is visible on left panel
   async function navigateToMonth(targetYear, targetMonth) {
-    for (let attempts = 0; attempts < 24; attempts++) {
-      const current = getDisplayedMonth();
-      if (!current) { await sleep(300); continue; }
-      const diff = (targetYear - current.year) * 12 + (targetMonth - current.month);
-      if (diff === 0) return; // already there
-      if (diff < 0) { clickPrev(); } else { clickNext(); }
+    for (let i = 0; i < 24; i++) {
+      const cur = getDisplayedMonth();
+      if (!cur) { await sleep(300); continue; }
+      const diff = (targetYear - cur.year) * 12 + (targetMonth - cur.month);
+      if (diff === 0) return;
+      if (diff < 0) clickPrev(); else clickNext();
       await sleep(400);
     }
   }
 
-  // Click a specific date on the calendar
-  // panel: 'left' (first/from month) or 'right' (second/to month)
   async function clickDate(year, month, day) {
-    // Navigate so this month is visible
-    const current = getDisplayedMonth();
-    if (!current) return;
+    const cur = getDisplayedMonth();
+    if (!cur) return;
 
-    // Left panel shows current.month, right panel shows current.month+1
-    const diffFromLeft  = (year - current.year) * 12 + (month - current.month);
-    const diffFromRight = diffFromLeft - 1;
+    const diffLeft  = (year - cur.year) * 12 + (month - cur.month);
+    const diffRight = diffLeft - 1;
 
-    if (diffFromLeft !== 0 && diffFromRight !== 0) {
+    if (diffLeft !== 0 && diffRight !== 0) {
       await navigateToMonth(year, month);
       await sleep(300);
     }
 
-    // Re-check which panel the month is on
     const cur2 = getDisplayedMonth();
-    const isLeftPanel = (year === cur2.year && month === cur2.month);
+    const isLeft = (year === cur2.year && month === cur2.month);
 
-    // Get all date table cells; left panel = first table, right = second
     const tables = document.querySelectorAll('.eds-date-table');
-    const table = isLeftPanel ? tables[0] : tables[1];
+    const table = isLeft ? tables[0] : tables[1];
     if (!table) return;
 
-    const cells = [...table.querySelectorAll('.eds-date-table__cell')]
-      .filter(c => {
-        const txt = c.textContent.trim();
-        const cls = String(c.className);
-        return txt === String(day) && !cls.includes('out-of-month') && !cls.includes('disabled');
-      });
+    const cell = [...table.querySelectorAll('.eds-date-table__cell')].find(c => {
+      const cls = String(c.className);
+      return c.textContent.trim() === String(day) &&
+             !cls.includes('out-of-month') && !cls.includes('disabled');
+    });
 
-    if (cells.length > 0) {
-      cells[0].click();
+    if (cell) {
+      fireClick(cell);
       await sleep(200);
     }
   }
 
+  // After the export modal is confirmed, navigate to Export History, poll for
+  // the generated file, then trigger the download with a custom filename.
+  async function waitAndDownload(from, to) {
+    await sleep(2000); // let the modal close
+
+    // Open Export History panel
+    const histBtn = findByText('Export History') || findByText('History');
+    if (histBtn) {
+      fireClick(histBtn);
+      await sleep(1500);
+    } else {
+      console.warn('[OrderExporter] Export History button not found — skipping auto-download');
+      return;
+    }
+
+    function pad(n) { return String(n).padStart(2, '0'); }
+    const fromStr = `${from.year}${pad(from.month)}${pad(from.day)}`;
+    const toStr   = `${to.year}${pad(to.month)}${pad(to.day)}`;
+    const fragment = `${fromStr}_${toStr}`;
+    const safeBrand = (brandName || 'ShopeeExport').replace(/[/\\?%*:|"<>]/g, '_');
+    const desiredFilename = `${safeBrand}_${fragment}.xlsx`;
+
+    const deadline = Date.now() + 3 * 60 * 1000; // wait up to 3 minutes
+    while (Date.now() < deadline) {
+
+      // Strategy 1: anchor with our date fragment in href
+      const anchor = [...document.querySelectorAll('a[href]')].find(a =>
+        a.href.includes(fragment)
+      );
+      if (anchor) {
+        console.log('[OrderExporter] Downloading via link:', anchor.href);
+        chrome.runtime.sendMessage({
+          action: 'downloadExport',
+          url: anchor.href,
+          filename: desiredFilename
+        });
+        return;
+      }
+
+      // Strategy 2: row whose text contains our fragment + has a download button
+      const rows = [...document.querySelectorAll('tr, li, [class*="item"], [class*="row"], [class*="record"]')];
+      for (const row of rows) {
+        if (!row.textContent.includes(fragment)) continue;
+        const dlEl = row.querySelector('a[href], button');
+        if (!dlEl) continue;
+        if (dlEl.tagName === 'A' && dlEl.href) {
+          console.log('[OrderExporter] Downloading via row link');
+          chrome.runtime.sendMessage({
+            action: 'downloadExport',
+            url: dlEl.href,
+            filename: desiredFilename
+          });
+        } else {
+          // No URL — just click the button; onDeterminingFilename will rename it
+          console.log('[OrderExporter] Clicking row download button');
+          fireClick(dlEl);
+        }
+        return;
+      }
+
+      await sleep(5000);
+    }
+
+    console.warn('[OrderExporter] Timed out waiting for export file in history');
+  }
+
   async function run() {
-    // 1. Guard: background.js navigates to /sale/order before injecting this script.
-    // If somehow we end up on the wrong page, bail — location.href would destroy
-    // this script context immediately so there is nothing useful we can do here.
+    // Guard: background navigates the tab before injection; bail if still wrong page
     if (!location.pathname.includes('/sale/order')) {
       console.warn('[OrderExporter] Wrong page, aborting:', location.pathname);
       return;
     }
 
-    // 2. Click Export button (real class confirmed via live inspection)
+    // 1. Click the Export button
     const exportBtn = await waitFor('button.export.export-with-modal');
-    exportBtn.click();
+    fireClick(exportBtn);
     await sleep(1500);
 
-    // 3. Wait for modal
+    // 2. Wait for the export modal
     await waitFor('.eds-modal.export-modal');
     await sleep(500);
 
-    // 4. Click date input to open calendar
+    // 3. Open the date picker
     const dateSelector = document.querySelector('.eds-modal.export-modal .eds-selector');
-    if (dateSelector) { dateSelector.click(); await sleep(600); }
+    if (dateSelector) {
+      fireClick(dateSelector);
+      await sleep(600);
+    }
 
-    // 5. Set dates
+    // 4. Confirm the calendar is open before trying to click dates
+    await waitFor('.eds-date-picker__picker', 5000).catch(() =>
+      console.warn('[OrderExporter] Calendar did not open — dates may not be set')
+    );
+    await sleep(300);
+
+    // 5. Set from / to dates by clicking calendar cells
     const { from, to } = getTargetDates();
 
-    // Navigate to the FROM month and click it
     await navigateToMonth(from.year, from.month);
     await sleep(400);
     await clickDate(from.year, from.month, from.day);
     await sleep(400);
 
-    // Now click the TO date (may need navigation if different month)
     await clickDate(to.year, to.month, to.day);
     await sleep(600);
 
-    // 6. Click Export button inside modal
+    // 6. Confirm export inside modal
     const modal = document.querySelector('.eds-modal.export-modal');
     const confirmBtn = modal?.querySelector('button.eds-button--primary');
     if (confirmBtn) {
-      confirmBtn.click();
+      fireClick(confirmBtn);
       console.log('[OrderExporter] Export triggered ✓');
     }
+
+    // 7. Open Export History, wait for file, download with brand-prefixed name
+    await waitAndDownload(from, to);
   }
 
   run().catch(e => console.error('[OrderExporter] Error:', e.message));
@@ -268,6 +374,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.action === 'syncAlarm') {
     syncAlarm().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.action === 'downloadExport') {
+    chrome.downloads.download({
+      url: msg.url,
+      filename: msg.filename,
+      conflictAction: 'uniquify'
+    }).then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 });
