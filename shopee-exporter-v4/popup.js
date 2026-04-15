@@ -7,6 +7,25 @@ function log(msg, type=''){
   $('logStrip').innerHTML = `<div class="log-entry ${type}">${t}  ${esc(msg)}</div>`;
 }
 
+// ─── Platform config ─────────────────────────────────────────────────────────
+const PLATFORMS = [
+  { key: 'shopee', pattern: 'https://seller.shopee.co.th/*',        label: 'Shopee', icon: '🛍',
+    titleStrip: /Shopee Seller Cent(re|er)[\s–\-|]*/i,
+    openUrl: 'https://seller.shopee.co.th/portal/sale/order' },
+  { key: 'lazada', pattern: 'https://sellercenter.lazada.co.th/*',  label: 'Lazada', icon: '🟠',
+    titleStrip: /Lazada Seller Cent(re|er)[\s–\-|]*/i,
+    openUrl: 'https://sellercenter.lazada.co.th/order/orderList' },
+  { key: 'lazada', pattern: 'https://sellercenter.lazada.sg/*',     label: 'Lazada', icon: '🟠',
+    titleStrip: /Lazada Seller Cent(re|er)[\s–\-|]*/i,
+    openUrl: 'https://sellercenter.lazada.sg/order/orderList' },
+];
+
+function stripTitle(title, platform) {
+  const cfg = PLATFORMS.find(p => p.key === platform);
+  if (!cfg) return title || 'Unknown';
+  return (title || '').replace(cfg.titleStrip, '').trim() || `${cfg.label} Brand`;
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 let tabs = [];
 let statuses = {};
@@ -14,7 +33,7 @@ let mode = 'D-1';
 
 // ─── Tab detection ───────────────────────────────────────────────────────────
 async function refreshTabs() {
-  // Safety net: if chrome.tabs.query never settles, clear Loading after 5 s
+  // Safety net: if queries never settle, clear Loading after 5 s
   const fallbackTimer = setTimeout(() => {
     if ($('tabList').querySelector('.no-tabs')?.textContent.includes('Loading')) {
       $('tabList').innerHTML = `<div class="no-tabs">
@@ -26,16 +45,24 @@ async function refreshTabs() {
       );
     }
   }, 5000);
+
   try {
-    const results = await chrome.tabs.query({ url: 'https://seller.shopee.co.th/*' });
+    // Query all platforms in parallel; tag each tab with its platform metadata
+    const results = await Promise.all(
+      PLATFORMS.map(p =>
+        chrome.tabs.query({ url: p.pattern })
+          .then(ts => ts.map(t => ({ ...t, platform: p.key, platformLabel: p.label, platformIcon: p.icon })))
+      )
+    );
     clearTimeout(fallbackTimer);
-    tabs = results;
+    tabs = results.flat();
     $('tabCount').textContent = tabs.length;
     renderTabs();
     if (tabs.length > 0) {
-      log(`Found ${tabs.length} Shopee tab(s) ✓`, 'ok');
+      const summary = [...new Set(tabs.map(t => t.platformLabel))].join(', ');
+      log(`Found ${tabs.length} tab(s) — ${summary} ✓`, 'ok');
     } else {
-      log('No Shopee tabs open yet', 'warn');
+      log('No seller tabs open yet', 'warn');
     }
   } catch (err) {
     clearTimeout(fallbackTimer);
@@ -56,7 +83,7 @@ function renderTabs() {
   const list = $('tabList');
   if (!tabs.length) {
     list.innerHTML = `<div class="no-tabs">
-      No Shopee seller tabs found.<br>
+      No seller tabs found.<br>
       <a id="openLink">Open Shopee Seller Center ↗</a>
     </div>`;
     $('openLink')?.addEventListener('click', () =>
@@ -65,16 +92,20 @@ function renderTabs() {
     return;
   }
   list.innerHTML = tabs.map(t => {
-    const st = statuses[t.id] || 'idle';
+    const st    = statuses[t.id] || 'idle';
     const label = {idle:'Ready',running:'Exporting…',done:'Done ✓',error:'Error'}[st];
-    const title = (t.title||'').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i,'').trim() || 'Shopee Brand';
-    const path  = (t.url||'').replace('https://seller.shopee.co.th','') || '/';
+    const title = stripTitle(t.title, t.platform);
+    const base  = t.platform === 'shopee'
+      ? 'https://seller.shopee.co.th'
+      : (t.url || '').match(/https?:\/\/[^/]+/)?.[0] || '';
+    const path  = (t.url || '').replace(base, '') || '/';
     return `<div class="tab-item">
-      <span class="tab-favicon">🛍</span>
+      <span class="tab-favicon">${esc(t.platformIcon)}</span>
       <div class="tab-info">
         <div class="tab-title" title="${esc(t.title)}">${esc(title)}</div>
         <div class="tab-url">${esc(path)}</div>
       </div>
+      <span class="platform-badge">${esc(t.platformLabel)}</span>
       <span class="tab-status ${st}" data-sid="${t.id}">${esc(label)}</span>
       <button class="tab-btn" data-tid="${t.id}">Export</button>
     </div>`;
@@ -187,7 +218,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   $('exportBtn').addEventListener('click', async () => {
     if (!tabs.length) {
-      log('No Shopee tabs found. Open seller.shopee.co.th first.', 'err');
+      log('No seller tabs found. Open a seller center first.', 'err');
       return;
     }
     await saveSettings();

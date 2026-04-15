@@ -1,6 +1,73 @@
-// background.js v4 — real mouse events, Export History auto-download, file rename
+// background.js v5 — multi-platform: Shopee + Lazada
 
-// ── Alarm scheduler ────────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function waitForTabLoad(tabId, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error('Tab load timeout: ' + tabId));
+    }, timeoutMs);
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+function detectPlatformFromUrl(url) {
+  if (url.includes('seller.shopee.')) return 'shopee';
+  if (url.includes('sellercenter.lazada.')) return 'lazada';
+  return 'unknown';
+}
+
+function extractBrandFromTitle(title, platform) {
+  if (platform === 'shopee') return (title || '').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i, '').trim();
+  if (platform === 'lazada') return (title || '').replace(/Lazada Seller Cent(re|er)[\s–\-|]*/i, '').trim();
+  return (title || '').trim();
+}
+
+// Compute { from, to } date objects from stored settings
+function computeDateRange(settings) {
+  const { dateMode, dateFrom, dateTo } = settings;
+  function offset(days) {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+  }
+  function parse(str) {
+    const d = new Date(str);
+    return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+  }
+  if (dateMode === 'D-1')  return { from: offset(1),  to: offset(1) };
+  if (dateMode === 'D-7')  return { from: offset(7),  to: offset(1) };
+  if (dateMode === 'D-30') return { from: offset(30), to: offset(1) };
+  if (dateMode === 'custom' && dateFrom && dateTo) return { from: parse(dateFrom), to: parse(dateTo) };
+  return { from: offset(1), to: offset(1) };
+}
+
+// ── Platform config ──────────────────────────────────────────────────────────
+// Each platform entry describes how to find tabs and which flow to inject.
+// lazadaExportFlow is a stub pending DOM inspection — see §lazadaExportFlow below.
+const PLATFORM_CONFIG = {
+  shopee: {
+    patterns:  ['https://seller.shopee.co.th/*'],
+    orderPath: '/portal/sale/order',
+    flow:      shopeeExportFlow,
+  },
+  lazada: {
+    patterns:  ['https://sellercenter.lazada.co.th/*', 'https://sellercenter.lazada.sg/*'],
+    orderPath: '/order/orderList',
+    flow:      lazadaExportFlow,
+  },
+};
+
+// ── Alarm scheduler ──────────────────────────────────────────────────────────
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'dailyExport') {
     const { scheduleEnabled } = await chrome.storage.local.get('scheduleEnabled');
@@ -28,32 +95,20 @@ chrome.storage.onChanged.addListener((changes) => {
   }
 });
 
-// ── Export coordinator ──────────────────────────────────────────────────────
+// ── Export coordinator ───────────────────────────────────────────────────────
 async function triggerExportOnAllTabs() {
   const settings = await chrome.storage.local.get(['dateMode', 'dateFrom', 'dateTo']);
-  const tabs = await chrome.tabs.query({ url: 'https://seller.shopee.co.th/*' });
 
-  for (const tab of tabs) {
-    if (!tab.url.includes('/sale/order')) {
-      await chrome.tabs.update(tab.id, { url: 'https://seller.shopee.co.th/portal/sale/order' });
-      await waitForTabLoad(tab.id);
-    }
-
-    // Store brand name so onDeterminingFilename can rename the download
-    const brand = (tab.title || '').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i, '').trim() || 'ShopeeExport';
-    await chrome.storage.local.set({ pendingDownloadBrand: brand });
-
-    try {
-      chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'running' }).catch(() => {});
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: shopeeExportFlow,
-        args: [{ ...settings, brandName: brand }]
-      });
-      await sleep(4000);
-    } catch (e) {
-      console.error('[Exporter] Tab', tab.id, e);
-      chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'error' }).catch(() => {});
+  for (const [platformKey, cfg] of Object.entries(PLATFORM_CONFIG)) {
+    const tabArrays = await Promise.all(cfg.patterns.map(p => chrome.tabs.query({ url: p })));
+    const platformTabs = tabArrays.flat();
+    for (const tab of platformTabs) {
+      try {
+        await runExportOnTab(tab, platformKey, cfg, settings);
+      } catch (e) {
+        console.error('[Exporter] Tab', tab.id, e);
+        chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'error' }).catch(() => {});
+      }
     }
   }
 }
@@ -63,75 +118,103 @@ async function exportSingleTab(tabId) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab) return;
 
-  if (!tab.url.includes('/sale/order')) {
-    await chrome.tabs.update(tabId, { url: 'https://seller.shopee.co.th/portal/sale/order' });
-    await waitForTabLoad(tabId);
+  const platformKey = detectPlatformFromUrl(tab.url);
+  const cfg = PLATFORM_CONFIG[platformKey];
+  if (!cfg) {
+    console.warn('[Exporter] Unknown platform for tab', tabId, tab.url);
+    return;
   }
 
-  const brand = (tab.title || '').replace(/Shopee Seller Cent(re|er)[\s–\-|]*/i, '').trim() || 'ShopeeExport';
-  await chrome.storage.local.set({ pendingDownloadBrand: brand });
+  try {
+    await runExportOnTab(tab, platformKey, cfg, settings);
+  } catch (e) {
+    console.error('[Exporter] Tab', tabId, e);
+    chrome.runtime.sendMessage({ action: 'tabProgress', tabId, status: 'error' }).catch(() => {});
+  }
+}
 
-  chrome.runtime.sendMessage({ action: 'tabProgress', tabId, status: 'running' }).catch(() => {});
+async function runExportOnTab(tab, platformKey, cfg, settings) {
+  // Navigate to orders page if not already there
+  const orderPathSegment = cfg.orderPath.replace(/^\//, '').split('/')[0];
+  if (!tab.url.includes(orderPathSegment)) {
+    const origin = tab.url.match(/https?:\/\/[^/]+/)?.[0] || '';
+    await chrome.tabs.update(tab.id, { url: origin + cfg.orderPath });
+    await waitForTabLoad(tab.id);
+    // Re-fetch tab so url/title are fresh after navigation
+    tab = await chrome.tabs.get(tab.id).catch(() => tab);
+  }
+
+  const brand = extractBrandFromTitle(tab.title, platformKey) || platformKey + 'Export';
+
+  // Pre-compute date fragment so onDeterminingFilename can use it for Lazada renames
+  const { from, to } = computeDateRange(settings);
+  const pad = n => String(n).padStart(2, '0');
+  const dateFragment = `${from.year}${pad(from.month)}${pad(from.day)}_${to.year}${pad(to.month)}${pad(to.day)}`;
+
+  await chrome.storage.local.set({
+    pendingDownloadBrand:        brand,
+    pendingDownloadPlatform:     platformKey,
+    pendingDownloadDateFragment: dateFragment,
+  });
+
+  chrome.runtime.sendMessage({ action: 'tabProgress', tabId: tab.id, status: 'running' }).catch(() => {});
+
+  // platformName is capitalized for use in filenames (e.g. 'Shopee', 'Lazada')
+  const platformName = platformKey.charAt(0).toUpperCase() + platformKey.slice(1);
+
   await chrome.scripting.executeScript({
-    target: { tabId },
-    func: shopeeExportFlow,
-    args: [{ ...settings, brandName: brand }]
+    target: { tabId: tab.id },
+    func:   cfg.flow,
+    args:   [{ ...settings, brandName: brand, platformName }],
   });
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ── Auto-rename downloads ────────────────────────────────────────────────────
+// Shopee: filename matches known pattern → rename directly from it.
+// Lazada: filename is a random 32-char hex hash → rename using stored context.
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  const basename = item.filename.split(/[/\\]/).pop();
+  const isShopeeExport = /Order\.all\.order_creation_date\.\d{8}_\d{8}\.xlsx$/i.test(basename);
+  const isLazadaExport = /^[a-f0-9]{32}\.xlsx$/i.test(basename);
 
-function waitForTabLoad(tabId, timeoutMs = 15000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error('Tab load timeout: ' + tabId));
-    }, timeoutMs);
+  if (!isShopeeExport && !isLazadaExport) return; // not ours — leave as-is
 
-    function listener(updatedTabId, changeInfo) {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
+  chrome.storage.local.get(
+    ['pendingDownloadBrand', 'pendingDownloadPlatform', 'pendingDownloadDateFragment'],
+    ({ pendingDownloadBrand, pendingDownloadPlatform, pendingDownloadDateFragment }) => {
+      const brand = (pendingDownloadBrand || 'Export')
+        .replace(/[/\\?%*:|"<>]/g, '_').trim() || 'Export';
+
+      // Platform display name for filename prefix (Shopee / Lazada / TikTok …)
+      const PLATFORM_DISPLAY = { shopee: 'Shopee', lazada: 'Lazada', tiktok: 'TikTok' };
+      const platformDisplay = PLATFORM_DISPLAY[pendingDownloadPlatform] || 'Export';
+
+      if (isShopeeExport) {
+        const match = basename.match(/(\d{8}_\d{8})\.xlsx$/i);
+        const datePart = match ? match[1] : 'unknown';
+        suggest({ filename: `${platformDisplay}_${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
+
+      } else if (isLazadaExport && pendingDownloadPlatform === 'lazada') {
+        const datePart = pendingDownloadDateFragment || 'unknown';
+        suggest({ filename: `${platformDisplay}_${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
+        // Clear platform flag to avoid accidentally renaming other xlsx files
+        chrome.storage.local.remove('pendingDownloadPlatform');
       }
     }
+  );
 
-    chrome.tabs.onUpdated.addListener(listener);
-  });
-}
-
-// ── Auto-rename Shopee exports on download ─────────────────────────────────
-// Fires before the file is saved — lets us rename without touching the file system.
-chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  if (!/Order\.all\.order_creation_date\.\d{8}_\d{8}\.xlsx$/i.test(item.filename)) {
-    return; // not a Shopee order export — leave filename as-is
-  }
-
-  chrome.storage.local.get('pendingDownloadBrand', ({ pendingDownloadBrand }) => {
-    const brand = (pendingDownloadBrand || 'ShopeeExport')
-      .replace(/[/\\?%*:|"<>]/g, '_') // strip filesystem-unsafe chars
-      .trim() || 'ShopeeExport';
-
-    const match = item.filename.match(/(\d{8}_\d{8})\.xlsx$/i);
-    const datePart = match ? match[1] : 'unknown';
-
-    suggest({ filename: `${brand}_${datePart}.xlsx`, conflictAction: 'uniquify' });
-  });
-
-  return true; // signal that suggest() will be called asynchronously
+  return true; // async suggest
 });
 
-// ── Main injected automation function ──────────────────────────────────────
+// ── Shopee export flow ───────────────────────────────────────────────────────
 // Serialised and injected into the Shopee tab — NO closures allowed.
-function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
+function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName }) {
 
-  // Will be overridden with the actual shop name read from the page DOM.
   let effectiveBrand = brandName || 'ShopeeExport';
+  const platform = platformName || 'Shopee';
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // Try to read the actual shop/store name from the page DOM.
-  // Shopee seller center shows the shop name in the navigation header.
   function getShopNameFromDOM() {
     const selectors = [
       '.subaccount-name',                                          // confirmed Shopee selector
@@ -143,13 +226,11 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     ];
     for (const sel of selectors) {
       const text = document.querySelector(sel)?.textContent?.trim();
-      // Require 2–60 chars to avoid matching empty or page-wide blobs
       if (text && text.length >= 2 && text.length <= 60) return text;
     }
     return '';
   }
 
-  // Dispatch real mouse events so React synthetic handlers fire
   function fireClick(el) {
     if (!el) return;
     ['mousedown', 'mouseup', 'click'].forEach(type =>
@@ -157,7 +238,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     );
   }
 
-  // Wait for a selector to appear in DOM
   function waitFor(selector, timeout = 12000) {
     return new Promise((resolve, reject) => {
       const el = document.querySelector(selector);
@@ -171,7 +251,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     });
   }
 
-  // Build { year, month(1-12), day } from date string or day-offset
   function getTargetDates() {
     function parse(str) {
       const d = new Date(str);
@@ -189,22 +268,17 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     return { from: offset(1), to: offset(1) };
   }
 
-  // Read the month/year shown on the LEFT calendar panel
   function getDisplayedMonth() {
     const monthNames = ['January','February','March','April','May','June','July',
                         'August','September','October','November','December'];
 
-    // Strategy 1: separate month and year labels ("March" + "2026")
     const labels = [...document.querySelectorAll('.eds-picker-header__label.clickable')];
     if (labels.length >= 2) {
-      const t0 = labels[0].textContent.trim();
-      const t1 = labels[1].textContent.trim();
-      const m = monthNames.indexOf(t0);
-      const y = parseInt(t1);
+      const m = monthNames.indexOf(labels[0].textContent.trim());
+      const y = parseInt(labels[1].textContent.trim());
       if (m >= 0 && !isNaN(y)) return { month: m + 1, year: y };
     }
 
-    // Strategy 2: combined label ("March2026" or "March 2026") — same element
     const anyLabel = document.querySelector('.eds-picker-header__label');
     if (anyLabel) {
       const text = anyLabel.textContent.trim();
@@ -217,7 +291,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
       }
     }
 
-    // Strategy 3: scan any picker-header element for month + year text
     for (const el of document.querySelectorAll('[class*="picker-header"]')) {
       const text = el.textContent.trim();
       const yearMatch = text.match(/(\d{4})/);
@@ -231,17 +304,13 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     return null;
   }
 
-  // Use native .click() for navigation arrows — they don't need React event dispatch
-  // and fireClick() would triple-trigger the handler (mousedown + mouseup + click).
   function clickPrev() {
-    // prev buttons: [«_left, <_left] when both share same class — want the LAST (month-back)
     const btns = [...document.querySelectorAll('.eds-picker-header__prev:not(.disabled)')];
     if (btns.length) { btns[btns.length - 1].click(); return true; }
     return false;
   }
 
   function clickNext() {
-    // next buttons: [>_right, »_right] when both share same class — want the FIRST (month-forward)
     const btns = [...document.querySelectorAll('.eds-picker-header__next:not(.disabled)')];
     if (btns.length) { btns[0].click(); return true; }
     return false;
@@ -289,25 +358,16 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     }
   }
 
-  // After the export modal is confirmed, the "Latest Reports" panel appears
-  // automatically — no button click needed to open it.
-  // The new entry starts as "Processing". We MUST wait for OUR specific new row
-  // to become "Download" — not click an old undownloaded entry for the same date.
-  //
-  // Phase 1: Find the row that contains our fragment AND "Processing" text.
-  //          This anchors us to the newly-submitted export, not any old entry.
-  // Phase 2: Watch that specific row for an enabled "Download" button.
   async function waitAndDownload(from, to) {
-    await sleep(1500); // brief pause for modal to close and panel to render
+    await sleep(1500);
 
     function pad(n) { return String(n).padStart(2, '0'); }
     const fromStr = `${from.year}${pad(from.month)}${pad(from.day)}`;
     const toStr   = `${to.year}${pad(to.month)}${pad(to.day)}`;
     const fragment = `${fromStr}_${toStr}`;
     const safeBrand = effectiveBrand.replace(/[/\\?%*:|"<>]/g, '_');
-    const desiredFilename = `${safeBrand}_${fragment}.xlsx`;
+    const desiredFilename = `${platform}_${safeBrand}_${fragment}.xlsx`;
 
-    // Return the smallest ancestor containing BOTH our fragment AND "Processing" text.
     function findProcessingRow() {
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
       let node;
@@ -321,8 +381,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
       return null;
     }
 
-    // Find an enabled "Download" button (exact text) within `scope`.
-    // If scope is null, searches globally with ancestor-fragment check.
     function findDownloadInScope(scope) {
       const isDownloadBtn = b =>
         b.textContent.trim().toLowerCase() === 'download' && !b.disabled;
@@ -333,7 +391,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
         }
         return null;
       }
-      // Global fallback: button's ancestor must contain our fragment
       for (const btn of document.querySelectorAll('button')) {
         if (!isDownloadBtn(btn)) continue;
         let el = btn.parentElement;
@@ -347,7 +404,7 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
       return null;
     }
 
-    // ── Phase 1: wait for the new "Processing" row (up to 30 s) ──────────────
+    // Phase 1: wait for "Processing" row (up to 30 s)
     let ourRow = null;
     let rowParent = null;
     let rowIndex = -1;
@@ -370,21 +427,20 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
       console.warn('[OrderExporter] Phase 1 timeout — no Processing row found; will search globally');
     }
 
-    // ── Phase 2: watch that row for the Download button (up to 3 min) ────────
+    // Phase 2: wait for Download button (up to 3 min)
     const downloadDeadline = Date.now() + 3 * 60 * 1000;
 
     while (Date.now() < downloadDeadline) {
       let el = null;
 
       if (ourRow) {
-        // If React replaced the element, re-anchor via parent + index
         if (!document.body.contains(ourRow)) {
           if (rowParent && document.body.contains(rowParent) && rowIndex >= 0) {
             const refreshed = rowParent.children[rowIndex];
             if (refreshed && refreshed.textContent.includes(fragment)) {
               ourRow = refreshed;
             } else {
-              ourRow = null; // position no longer matches our fragment
+              ourRow = null;
             }
           } else {
             ourRow = null;
@@ -393,7 +449,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
         if (ourRow) el = findDownloadInScope(ourRow);
       }
 
-      // Global fallback only when row tracking is gone (Phase 1 failed or row lost)
       if (!el && !ourRow) {
         el = findDownloadInScope(null);
       }
@@ -404,7 +459,7 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
           chrome.runtime.sendMessage({ action: 'downloadExport', url: el.href, filename: desiredFilename });
         } else {
           console.log('[OrderExporter] Clicking Download button for', fragment);
-          fireClick(el); // onDeterminingFilename renames the file
+          fireClick(el);
         }
         return;
       }
@@ -416,14 +471,11 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
   }
 
   async function run() {
-    // Guard: background navigates the tab before injection; bail if still wrong page
     if (!location.pathname.includes('/sale/order')) {
       console.warn('[OrderExporter] Wrong page, aborting:', location.pathname);
       return;
     }
 
-    // Override brand name with the actual shop name shown in the page DOM.
-    // This is more reliable than deriving it from the tab title.
     const domBrand = getShopNameFromDOM();
     if (domBrand) {
       effectiveBrand = domBrand;
@@ -431,29 +483,24 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
       console.log('[OrderExporter] Brand from DOM:', domBrand);
     }
 
-    // 1. Click the Export button
     const exportBtn = await waitFor('button.export.export-with-modal');
     fireClick(exportBtn);
     await sleep(1500);
 
-    // 2. Wait for the export modal
     await waitFor('.eds-modal.export-modal');
     await sleep(500);
 
-    // 3. Open the date picker
     const dateSelector = document.querySelector('.eds-modal.export-modal .eds-selector');
     if (dateSelector) {
       fireClick(dateSelector);
       await sleep(600);
     }
 
-    // 4. Confirm the calendar is open before trying to click dates
     await waitFor('.eds-date-picker__picker', 5000).catch(() =>
       console.warn('[OrderExporter] Calendar did not open — dates may not be set')
     );
     await sleep(300);
 
-    // 5. Set from / to dates by clicking calendar cells
     const { from, to } = getTargetDates();
 
     await navigateToMonth(from.year, from.month);
@@ -464,7 +511,6 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     await clickDate(to.year, to.month, to.day);
     await sleep(600);
 
-    // 6. Confirm export inside modal
     const modal = document.querySelector('.eds-modal.export-modal');
     const confirmBtn = modal?.querySelector('button.eds-button--primary');
     if (confirmBtn) {
@@ -472,14 +518,102 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
       console.log('[OrderExporter] Export triggered ✓');
     }
 
-    // 7. Open Export History, wait for file, download with brand-prefixed name
     await waitAndDownload(from, to);
   }
 
   run().catch(e => console.error('[OrderExporter] Error:', e.message));
 }
 
-// ── Message handler ────────────────────────────────────────────────────────
+// ── Lazada export flow ───────────────────────────────────────────────────────
+// Skeleton — selectors TBD after live DOM inspection of sellercenter.lazada.co.th
+// Run the following in the Lazada console to find selectors:
+//
+//   document.querySelectorAll('button').forEach(b => console.log(b.textContent.trim(), b.className));
+//   document.querySelectorAll('[class*=shop],[class*=store],[class*=brand],[class*=seller]')
+//     .forEach(e => { const t=e.textContent.trim(); if(t.length>2&&t.length<60&&!e.children.length) console.log(e.tagName,e.className,t); });
+//
+function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName }) {
+
+  let effectiveBrand = brandName || 'LazadaExport';
+  const platform = platformName || 'Lazada'; // eslint-disable-line no-unused-vars
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function fireClick(el) {
+    if (!el) return;
+    ['mousedown', 'mouseup', 'click'].forEach(type =>
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }))
+    );
+  }
+
+  function waitFor(selector, timeout = 12000) {
+    return new Promise((resolve, reject) => {
+      const el = document.querySelector(selector);
+      if (el) return resolve(el);
+      const obs = new MutationObserver(() => {
+        const found = document.querySelector(selector);
+        if (found) { obs.disconnect(); resolve(found); }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => { obs.disconnect(); reject(new Error('Timeout: ' + selector)); }, timeout);
+    });
+  }
+
+  function getTargetDates() {
+    function parse(str) {
+      const d = new Date(str);
+      return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+    }
+    function offset(days) {
+      const d = new Date();
+      d.setDate(d.getDate() - days);
+      return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+    }
+    if (dateMode === 'D-1')  return { from: offset(1),  to: offset(1) };
+    if (dateMode === 'D-7')  return { from: offset(7),  to: offset(1) };
+    if (dateMode === 'D-30') return { from: offset(30), to: offset(1) };
+    if (dateMode === 'custom' && dateFrom && dateTo) return { from: parse(dateFrom), to: parse(dateTo) };
+    return { from: offset(1), to: offset(1) };
+  }
+
+  function getShopNameFromDOM() {
+    // TODO: update selectors after live DOM inspection
+    const selectors = [
+      '[class*="shop-name"]', '[class*="shopName"]',
+      '[class*="store-name"]', '[class*="storeName"]',
+      '[class*="seller-name"]', '[class*="sellerName"]',
+    ];
+    for (const sel of selectors) {
+      const text = document.querySelector(sel)?.textContent?.trim();
+      if (text && text.length >= 2 && text.length <= 60) return text;
+    }
+    return '';
+  }
+
+  async function run() {
+    if (!location.pathname.includes('/order')) {
+      console.warn('[OrderExporter-Lazada] Wrong page, aborting:', location.pathname);
+      return;
+    }
+
+    const domBrand = getShopNameFromDOM();
+    if (domBrand) {
+      effectiveBrand = domBrand;
+      chrome.storage.local.set({ pendingDownloadBrand: domBrand });
+      console.log('[OrderExporter-Lazada] Brand from DOM:', domBrand);
+    }
+
+    // TODO: implement after DOM inspection confirms:
+    //   - date range input selectors
+    //   - export button selector
+    //   - whether download is immediate or queued
+    console.warn('[OrderExporter-Lazada] Flow not yet implemented — needs DOM inspection');
+  }
+
+  run().catch(e => console.error('[OrderExporter-Lazada] Error:', e.message));
+}
+
+// ── Message handler ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'exportNow') {
     triggerExportOnAllTabs().then(() => sendResponse({ ok: true }));

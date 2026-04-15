@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Order Exporter — Shopee",
-  "version": "1.0.0",
-  "description": "Auto-export orders from Shopee seller center across all your brand windows",
+  "name": "Order Exporter — Multi-Platform",
+  "version": "1.1.0",
+  "description": "Auto-export orders from Shopee, Lazada and more across all your brand windows",
   "permissions": [
     "tabs",
     "scripting",
@@ -11,7 +11,9 @@
     "downloads"
   ],
   "host_permissions": [
-    "https://seller.shopee.co.th/*"
+    "https://seller.shopee.co.th/*",
+    "https://sellercenter.lazada.co.th/*",
+    "https://sellercenter.lazada.sg/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -28,6 +30,14 @@
     {
       "matches": ["https://seller.shopee.co.th/*"],
       "js": ["content/shopee.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://sellercenter.lazada.co.th/*",
+        "https://sellercenter.lazada.sg/*"
+      ],
+      "js": ["content/lazada.js"],
       "run_at": "document_idle"
     }
   ],
