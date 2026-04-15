@@ -289,9 +289,12 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
 
   // After the export modal is confirmed, the "Latest Reports" panel appears
   // automatically — no button click needed to open it.
-  // The new entry starts as "Processing" text. Poll until it shows an enabled
-  // orange "Download" button, then click it.
-  // onDeterminingFilename (service worker) renames the resulting file.
+  // The new entry starts as "Processing". We MUST wait for OUR specific new row
+  // to become "Download" — not click an old undownloaded entry for the same date.
+  //
+  // Phase 1: Find the row that contains our fragment AND "Processing" text.
+  //          This anchors us to the newly-submitted export, not any old entry.
+  // Phase 2: Watch that specific row for an enabled "Download" button.
   async function waitAndDownload(from, to) {
     await sleep(1500); // brief pause for modal to close and panel to render
 
@@ -302,49 +305,108 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     const safeBrand = effectiveBrand.replace(/[/\\?%*:|"<>]/g, '_');
     const desiredFilename = `${safeBrand}_${fragment}.xlsx`;
 
-    // Find an enabled "Download" button (exact text, not "Downloaded") whose
-    // ancestor also contains our date fragment. Walk UP from the button itself
-    // so we never accidentally reach a container that holds unrelated rows.
-    function findDownloadBtn() {
-      // Exact-match: "Download" only, never "Downloaded" or "Downloading"
-      const isDownloadBtn = (b) =>
+    // Return the smallest ancestor containing BOTH our fragment AND "Processing" text.
+    function findProcessingRow() {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.textContent.trim().toLowerCase().includes('processing')) continue;
+        let el = node.parentElement;
+        for (let d = 0; d < 10 && el; d++, el = el.parentElement) {
+          if (el.textContent.includes(fragment)) return el;
+        }
+      }
+      return null;
+    }
+
+    // Find an enabled "Download" button (exact text) within `scope`.
+    // If scope is null, searches globally with ancestor-fragment check.
+    function findDownloadInScope(scope) {
+      const isDownloadBtn = b =>
         b.textContent.trim().toLowerCase() === 'download' && !b.disabled;
 
+      if (scope) {
+        for (const btn of scope.querySelectorAll('button')) {
+          if (isDownloadBtn(btn)) return btn;
+        }
+        return null;
+      }
+      // Global fallback: button's ancestor must contain our fragment
       for (const btn of document.querySelectorAll('button')) {
         if (!isDownloadBtn(btn)) continue;
-        // Walk up from this button — does any ancestor contain our fragment?
         let el = btn.parentElement;
         for (let depth = 0; depth < 8 && el; depth++, el = el.parentElement) {
           if (el.textContent.includes(fragment)) return btn;
         }
       }
-
-      // Fallback: direct anchor href containing the fragment
       for (const anchor of document.querySelectorAll('a[href]')) {
         if (anchor.href.includes(fragment) && !anchor.disabled) return anchor;
       }
-
       return null;
     }
 
-    const deadline = Date.now() + 3 * 60 * 1000; // wait up to 3 minutes
-    while (Date.now() < deadline) {
-      const el = findDownloadBtn();
+    // ── Phase 1: wait for the new "Processing" row (up to 30 s) ──────────────
+    let ourRow = null;
+    let rowParent = null;
+    let rowIndex = -1;
+    const phase1Deadline = Date.now() + 30000;
+
+    console.log('[OrderExporter] Phase 1: waiting for Processing entry for', fragment);
+    while (Date.now() < phase1Deadline) {
+      const row = findProcessingRow();
+      if (row) {
+        ourRow    = row;
+        rowParent = row.parentElement;
+        rowIndex  = rowParent ? Array.from(rowParent.children).indexOf(row) : -1;
+        console.log('[OrderExporter] Phase 1 done — Processing row at index', rowIndex);
+        break;
+      }
+      await sleep(2000);
+    }
+
+    if (!ourRow) {
+      console.warn('[OrderExporter] Phase 1 timeout — no Processing row found; will search globally');
+    }
+
+    // ── Phase 2: watch that row for the Download button (up to 3 min) ────────
+    const downloadDeadline = Date.now() + 3 * 60 * 1000;
+
+    while (Date.now() < downloadDeadline) {
+      let el = null;
+
+      if (ourRow) {
+        // If React replaced the element, re-anchor via parent + index
+        if (!document.body.contains(ourRow)) {
+          if (rowParent && document.body.contains(rowParent) && rowIndex >= 0) {
+            const refreshed = rowParent.children[rowIndex];
+            if (refreshed && refreshed.textContent.includes(fragment)) {
+              ourRow = refreshed;
+            } else {
+              ourRow = null; // position no longer matches our fragment
+            }
+          } else {
+            ourRow = null;
+          }
+        }
+        if (ourRow) el = findDownloadInScope(ourRow);
+      }
+
+      // Global fallback only when row tracking is gone (Phase 1 failed or row lost)
+      if (!el && !ourRow) {
+        el = findDownloadInScope(null);
+      }
+
       if (el) {
         if (el.tagName === 'A' && el.href) {
           console.log('[OrderExporter] Downloading via link for', fragment);
-          chrome.runtime.sendMessage({
-            action: 'downloadExport',
-            url: el.href,
-            filename: desiredFilename
-          });
+          chrome.runtime.sendMessage({ action: 'downloadExport', url: el.href, filename: desiredFilename });
         } else {
           console.log('[OrderExporter] Clicking Download button for', fragment);
           fireClick(el); // onDeterminingFilename renames the file
         }
         return;
       }
-      // Not ready yet (still "Processing") — wait and retry
+
       await sleep(5000);
     }
 
