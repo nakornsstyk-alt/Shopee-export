@@ -176,26 +176,59 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
 
   // Read the month/year shown on the LEFT calendar panel
   function getDisplayedMonth() {
-    const headers = [...document.querySelectorAll('.eds-picker-header__label.clickable')];
-    if (headers.length >= 2) {
-      const monthNames = ['January','February','March','April','May','June','July',
-                          'August','September','October','November','December'];
-      const monthText = headers[0].textContent.trim();
-      const yearText  = headers[1].textContent.trim();
-      return { month: monthNames.indexOf(monthText) + 1, year: parseInt(yearText) };
+    const monthNames = ['January','February','March','April','May','June','July',
+                        'August','September','October','November','December'];
+
+    // Strategy 1: separate month and year labels ("March" + "2026")
+    const labels = [...document.querySelectorAll('.eds-picker-header__label.clickable')];
+    if (labels.length >= 2) {
+      const t0 = labels[0].textContent.trim();
+      const t1 = labels[1].textContent.trim();
+      const m = monthNames.indexOf(t0);
+      const y = parseInt(t1);
+      if (m >= 0 && !isNaN(y)) return { month: m + 1, year: y };
     }
+
+    // Strategy 2: combined label ("March2026" or "March 2026") — same element
+    const anyLabel = document.querySelector('.eds-picker-header__label');
+    if (anyLabel) {
+      const text = anyLabel.textContent.trim();
+      const yearMatch = text.match(/(\d{4})/);
+      if (yearMatch) {
+        const year = parseInt(yearMatch[1]);
+        for (let i = 0; i < monthNames.length; i++) {
+          if (text.includes(monthNames[i])) return { month: i + 1, year };
+        }
+      }
+    }
+
+    // Strategy 3: scan any picker-header element for month + year text
+    for (const el of document.querySelectorAll('[class*="picker-header"]')) {
+      const text = el.textContent.trim();
+      const yearMatch = text.match(/(\d{4})/);
+      if (!yearMatch) continue;
+      const year = parseInt(yearMatch[1]);
+      for (let i = 0; i < monthNames.length; i++) {
+        if (text.includes(monthNames[i])) return { month: i + 1, year };
+      }
+    }
+
     return null;
   }
 
+  // Use native .click() for navigation arrows — they don't need React event dispatch
+  // and fireClick() would triple-trigger the handler (mousedown + mouseup + click).
   function clickPrev() {
+    // prev buttons: [«_left, <_left] when both share same class — want the LAST (month-back)
     const btns = [...document.querySelectorAll('.eds-picker-header__prev:not(.disabled)')];
-    if (btns.length) { fireClick(btns[0]); return true; }
+    if (btns.length) { btns[btns.length - 1].click(); return true; }
     return false;
   }
 
   function clickNext() {
+    // next buttons: [>_right, »_right] when both share same class — want the FIRST (month-forward)
     const btns = [...document.querySelectorAll('.eds-picker-header__next:not(.disabled)')];
-    if (btns.length) { fireClick(btns[btns.length - 1]); return true; }
+    if (btns.length) { btns[0].click(); return true; }
     return false;
   }
 
