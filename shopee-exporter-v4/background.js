@@ -268,9 +268,10 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
   }
 
   // After the export modal is confirmed, the "Latest Reports" panel appears
-  // automatically — no button click needed to open it. Poll until the entry for
-  // our date range shows an enabled Download button, then click it.
-  // onDeterminingFilename (in the service worker) will rename the file.
+  // automatically — no button click needed to open it.
+  // The new entry starts as "Processing" text. Poll until it shows an enabled
+  // orange "Download" button, then click it.
+  // onDeterminingFilename (service worker) renames the resulting file.
   async function waitAndDownload(from, to) {
     await sleep(1500); // brief pause for modal to close and panel to render
 
@@ -281,38 +282,50 @@ function shopeeExportFlow({ dateMode, dateFrom, dateTo, brandName }) {
     const safeBrand = (brandName || 'ShopeeExport').replace(/[/\\?%*:|"<>]/g, '_');
     const desiredFilename = `${safeBrand}_${fragment}.xlsx`;
 
+    // Walk text nodes to find the one containing our fragment, then climb the DOM
+    // to find a sibling/ancestor Download button. This works regardless of whatever
+    // class names Shopee uses on the report list rows.
+    function findDownloadBtn() {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.textContent.includes(fragment)) continue;
+        // Found the text node — walk up looking for a container with a Download button
+        let el = node.parentElement;
+        for (let depth = 0; depth < 8 && el; depth++, el = el.parentElement) {
+          // Check for an enabled Download button
+          const btn = [...el.querySelectorAll('button')].find(b =>
+            /download/i.test(b.textContent.trim()) && !b.disabled
+          );
+          if (btn) return btn;
+          // Also check for a direct download anchor
+          const anchor = [...el.querySelectorAll('a[href]')].find(a =>
+            a.href && !a.disabled
+          );
+          if (anchor) return anchor;
+        }
+      }
+      return null;
+    }
+
     const deadline = Date.now() + 3 * 60 * 1000; // wait up to 3 minutes
     while (Date.now() < deadline) {
-
-      // Look for rows/items whose text contains our date fragment
-      const rows = [...document.querySelectorAll('tr, li, [class*="item"], [class*="row"], [class*="record"]')];
-      for (const row of rows) {
-        if (!row.textContent.includes(fragment)) continue;
-
-        // Prefer an anchor with a direct download URL (most controlled rename)
-        const anchor = row.querySelector('a[href]');
-        if (anchor && anchor.href && !anchor.disabled) {
+      const el = findDownloadBtn();
+      if (el) {
+        if (el.tagName === 'A' && el.href) {
           console.log('[OrderExporter] Downloading via link for', fragment);
           chrome.runtime.sendMessage({
             action: 'downloadExport',
-            url: anchor.href,
+            url: el.href,
             filename: desiredFilename
           });
-          return;
-        }
-
-        // Otherwise find an enabled Download button (orange = enabled, grey = still processing)
-        const dlBtn = [...row.querySelectorAll('button')].find(b =>
-          b.textContent.trim().toLowerCase().includes('download') && !b.disabled
-        );
-        if (dlBtn) {
+        } else {
           console.log('[OrderExporter] Clicking Download button for', fragment);
-          fireClick(dlBtn); // onDeterminingFilename will rename the resulting file
-          return;
+          fireClick(el); // onDeterminingFilename renames the file
         }
-        // Button exists but is still disabled/grey — keep polling
+        return;
       }
-
+      // Not ready yet (still "Processing") — wait and retry
       await sleep(5000);
     }
 
