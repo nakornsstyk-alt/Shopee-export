@@ -89,6 +89,11 @@
   .export-all-btn:active{transform:scale(.98)}
   .export-all-btn:disabled{background:var(--border);color:var(--muted);cursor:not-allowed}
 
+  .refresh-btn{width:100%;background:none;color:var(--muted);border:1px solid var(--border);border-radius:var(--r);padding:9px;font-family:'Syne',sans-serif;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s;margin-top:7px}
+  .refresh-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .refresh-btn:active{transform:scale(.98)}
+  .refresh-btn:disabled{opacity:0.4;cursor:not-allowed}
+
   .log-strip{padding:6px 18px 12px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);min-height:28px}
   .log-entry.ok  {color:var(--green)}
   .log-entry.err {color:#ff6b6b}
@@ -156,6 +161,9 @@
   <button class="export-all-btn" id="exportBtn">
     <span id="btnIcon">⬇</span>
     <span id="btnText">Export All Brands Now</span>
+  </button>
+  <button class="refresh-btn" id="refreshBtn">
+    ↺ Refresh All Pages to Order List
   </button>
 </div>
 <div class="log-strip" id="logStrip"></div>

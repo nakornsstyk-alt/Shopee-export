@@ -14,10 +14,10 @@ const PLATFORMS = [
     openUrl: 'https://seller.shopee.co.th/portal/sale/order' },
   { key: 'lazada', pattern: 'https://sellercenter.lazada.co.th/*',  label: 'Lazada', icon: '🟠',
     titleStrip: /Lazada Seller Cent(re|er)[\s–\-|]*/i,
-    openUrl: 'https://sellercenter.lazada.co.th/order/orderList' },
+    openUrl: 'https://sellercenter.lazada.co.th/apps/order/list?oldVersion=1&status=all' },
   { key: 'lazada', pattern: 'https://sellercenter.lazada.sg/*',     label: 'Lazada', icon: '🟠',
     titleStrip: /Lazada Seller Cent(re|er)[\s–\-|]*/i,
-    openUrl: 'https://sellercenter.lazada.sg/order/orderList' },
+    openUrl: 'https://sellercenter.lazada.sg/apps/order/list?oldVersion=1&status=all' },
 ];
 
 function stripTitle(title, platform) {
@@ -239,6 +239,31 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => { $('btnIcon').textContent = '⬇'; }, 2500);
       }, tabs.length * 9000);
     });
+  });
+
+  $('refreshBtn').addEventListener('click', async () => {
+    if (!tabs.length) {
+      log('No seller tabs found. Nothing to refresh.', 'warn');
+      return;
+    }
+    const btn = $('refreshBtn');
+    btn.disabled = true;
+    btn.textContent = `↺ Refreshing ${tabs.length} tab(s)…`;
+    log(`Navigating ${tabs.length} tab(s) to order pages…`);
+
+    for (const t of tabs) {
+      // find the platform config whose glob pattern matches this tab's URL
+      const match = PLATFORMS.find(p => t.url && new RegExp('^' + p.pattern.replace(/\*/g, '.*') + '$').test(t.url));
+      const url = match?.openUrl || t.url;
+      await chrome.tabs.update(t.id, { url });
+    }
+
+    log(`Pages refreshed ✓ — waiting for load…`, 'ok');
+    setTimeout(async () => {
+      await refreshTabs();
+      btn.disabled = false;
+      btn.textContent = '↺ Refresh All Pages to Order List';
+    }, 3000);
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
