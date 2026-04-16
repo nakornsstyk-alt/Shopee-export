@@ -661,93 +661,76 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
   async function setDateRange(from, to) {
     function pad(n) { return String(n).padStart(2, '0'); }
 
-    // SHORTCUT: for preset modes click the matching Thai tag directly.
-    const PRESET_TAG = {
-      'D-1':  'เมื่อวานนี้',
-      'D-7':  'ผ่านมา7วัน',
-      'D-30': 'ผ่านมา30วัน',
-    };
+    // PRESET SHORTCUT (D-1 / D-7 / D-30)
+    const PRESET_TAG = { 'D-1': 'เมื่อวานนี้', 'D-7': 'ผ่านมา7วัน', 'D-30': 'ผ่านมา30วัน' };
     const presetLabel = PRESET_TAG[dateMode];
     if (presetLabel) {
-      const presetBtn = [...document.querySelectorAll('.next-tag-checkable')]
+      const btn = [...document.querySelectorAll('.next-tag-checkable')]
         .find(el => (el.querySelector('.next-tag-body') || el).textContent.trim() === presetLabel);
-      if (presetBtn) {
-        presetBtn.click();
-        console.log('[OrderExporter-Lazada] Preset tag clicked:', presetLabel, '✓');
+      if (btn) {
+        btn.click();
+        console.log('[OrderExporter-Lazada] Preset clicked:', presetLabel, '✓');
         await sleep(600);
         return true;
       }
-      console.warn('[OrderExporter-Lazada] Preset tag not found:', presetLabel, '— using custom picker');
+      console.warn('[OrderExporter-Lazada] Preset tag not found:', presetLabel, '— using date picker');
     }
 
-    // CUSTOM DATE RANGE
+    // CUSTOM DATE: click กำหนดเอง, open calendar, click date cells by title attribute
     const fromStr = `${from.year}-${pad(from.month)}-${pad(from.day)}`;
     const toStr   = `${to.year}-${pad(to.month)}-${pad(to.day)}`;
 
-    // Step 1: activate "กำหนดเอง" tag
-    const customTag = [...document.querySelectorAll('.next-tag-checkable')].find(el =>
-      (el.querySelector('.next-tag-body') || el).textContent.trim().includes('กำหนดเอง')
-    );
+    // Step 1: activate กำหนดเอง
+    const customTag = [...document.querySelectorAll('.next-tag-checkable')]
+      .find(el => (el.querySelector('.next-tag-body') || el).textContent.trim().includes('กำหนดเอง'));
     if (!customTag) { console.warn('[OrderExporter-Lazada] Custom tag not found'); return false; }
     customTag.click();
     await sleep(800);
 
-    // Step 2: open calendar with a single .click() — NOT fireClick.
-    // fireClick fires mousedown+mouseup+click which can toggle the popup closed again.
+    // Step 2: open calendar with a SINGLE .click() (fireClick toggle-closes the popup)
     const trigger = document.querySelector('.next-range-picker-trigger');
     if (!trigger) { console.warn('[OrderExporter-Lazada] Trigger not found'); return false; }
     trigger.click();
     await waitFor('.next-calendar-range', 5000).catch(() =>
-      console.warn('[OrderExporter-Lazada] Calendar did not open')
+      console.warn('[OrderExporter-Lazada] Calendar slow to open')
     );
     await sleep(600);
 
-    // Step 3: type dates using execCommand (generates real beforeinput/input events React accepts).
-    // The 2 input[placeholder="YYYY-MM-DD"] elements appear inside the picker popup.
-    function typeIntoInput(el, value) {
-      el.click();
-      el.focus();
-      el.select();
-      document.execCommand('selectAll', false, null);
-      document.execCommand('insertText', false, value);
-      console.log('[OrderExporter-Lazada] Input value after type:', el.value);
-    }
-
-    const dateInputs = [...document.querySelectorAll('input[placeholder="YYYY-MM-DD"]')];
-    console.log('[OrderExporter-Lazada] Date inputs found:', dateInputs.length);
-
-    if (dateInputs.length >= 2) {
-      typeIntoInput(dateInputs[0], fromStr);
-      await sleep(500);
-      // Tab to move focus to next field so React commits the first value
-      dateInputs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', bubbles: true }));
-      await sleep(300);
-      typeIntoInput(dateInputs[1], toStr);
-      await sleep(500);
-      dateInputs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', bubbles: true }));
-      await sleep(500);
-      console.log('[OrderExporter-Lazada] Dates typed:', fromStr, '→', toStr);
-    } else {
-      // Last resort: calendar cell clicks
-      console.warn('[OrderExporter-Lazada] No date inputs found — trying calendar cell clicks');
-      await navigateToLeftMonth(from.year, from.month);
-      await sleep(400);
-      clickDateInPanel('.next-calendar-body-left', from.day);
-      await sleep(600);
-      const diff = (to.year * 12 + to.month) - (from.year * 12 + from.month);
-      if (diff === 0) {
-        clickDateInPanel('.next-calendar-body-left', to.day);
-      } else {
-        for (let i = 0; i < diff - 1; i++) {
+    // Step 3: click date cells using td[title="YYYY-MM-DD"].
+    // DOM inspection confirmed every cell has title="YYYY-MM-DD" — no left/right panel logic needed.
+    // If the target month is not visible, navigate to it first.
+    async function showAndClickCell(dateStr) {
+      const [y, m] = dateStr.split('-').map(Number);
+      for (let attempt = 0; attempt < 14; attempt++) {
+        const cell = document.querySelector(`td[title="${dateStr}"]`);
+        if (cell && !cell.className.includes('disabled')) {
+          cell.click();
+          console.log('[OrderExporter-Lazada] Clicked cell:', dateStr);
+          return true;
+        }
+        // Cell not visible yet — navigate toward it
+        const cur = getLeftPanelMonth();
+        if (!cur) { await sleep(300); continue; }
+        const diff = (y - cur.year) * 12 + (m - cur.month);
+        if (diff < 0 || diff === 0) {
+          const btn = document.querySelector('.next-calendar-panel-header-left .next-calendar-btn-prev-month')
+                   || document.querySelector('.next-calendar-btn-prev-month');
+          if (btn) btn.click();
+        } else {
           const btn = document.querySelector('.next-calendar-panel-header-right .next-calendar-btn-next-month')
                    || document.querySelector('.next-calendar-btn-next-month');
-          if (btn) fireClick(btn);
-          await sleep(400);
+          if (btn) btn.click();
         }
-        clickDateInPanel('.next-calendar-body-right', to.day);
+        await sleep(400);
       }
-      await sleep(400);
+      console.warn('[OrderExporter-Lazada] Could not find cell for:', dateStr);
+      return false;
     }
+
+    await showAndClickCell(fromStr);
+    await sleep(500);
+    await showAndClickCell(toStr);
+    await sleep(400);
 
     // Step 4: confirm
     const footer = document.querySelector('.next-date-picker-panel-footer');
