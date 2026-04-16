@@ -659,6 +659,10 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
   }
 
   async function setDateRange(from, to) {
+    function pad(n) { return String(n).padStart(2, '0'); }
+    const fromStr = `${from.year}-${pad(from.month)}-${pad(from.day)}`;
+    const toStr   = `${to.year}-${pad(to.month)}-${pad(to.day)}`;
+
     // 1. Click "กำหนดเอง" (Custom) tag to reveal the date-range picker
     const customTag = [...document.querySelectorAll('.next-tag-checkable')].find(el =>
       (el.querySelector('.next-tag-body') || el).textContent.trim().includes('กำหนดเอง')
@@ -670,7 +674,7 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
     fireClick(customTag);
     await sleep(600);
 
-    // 2. Click the range-picker trigger to open the calendar
+    // 2. Click the range-picker trigger to open the calendar panel
     const trigger = document.querySelector('.next-range-picker-trigger');
     if (!trigger) {
       console.warn('[OrderExporter-Lazada] Date range trigger not found');
@@ -680,47 +684,59 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
     await waitFor('.next-calendar-range', 5000).catch(() =>
       console.warn('[OrderExporter-Lazada] Calendar did not open in time')
     );
-    await sleep(400);
+    await sleep(600);
 
-    // 3. Navigate left panel to FROM month
-    await navigateToLeftMonth(from.year, from.month);
-    await sleep(400);
-
-    // 4. Click FROM date in left panel
-    if (!clickDateInPanel('.next-calendar-body-left', from.day)) {
-      console.warn('[OrderExporter-Lazada] FROM date cell not found:', from);
+    // 3. PRIMARY: type directly into the YYYY-MM-DD text inputs inside the picker panel.
+    //    This is more reliable than clicking calendar cells (React-controlled inputs).
+    function typeIntoInput(el, value) {
+      el.focus();
+      fireClick(el);
+      // Set value via the native setter so React detects the change
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeSetter.call(el, value);
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      // Simulate Enter to confirm the typed value
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', bubbles: true }));
     }
-    await sleep(400);
 
-    // 5. Click TO date
-    // After clicking FROM, left panel = FROM month, right panel = FROM month + 1.
-    // For TO in the same month as FROM → click in left panel.
-    // For TO one month ahead          → click in right panel (already visible).
-    // For TO N months ahead (N > 1)   → advance (N-1) more times, then click in right panel.
-    const fromOrdinal = from.year * 12 + from.month;
-    const toOrdinal   = to.year   * 12 + to.month;
-    const diff        = toOrdinal - fromOrdinal;
+    // The picker panel renders two "YYYY-MM-DD" inputs: [0] = start date, [1] = end date
+    const dateInputs = [...document.querySelectorAll('input[placeholder="YYYY-MM-DD"]')];
+    console.log('[OrderExporter-Lazada] Found', dateInputs.length, 'date input(s)');
 
-    if (diff === 0) {
-      // Same month as FROM — use left panel
-      if (!clickDateInPanel('.next-calendar-body-left', to.day)) {
-        console.warn('[OrderExporter-Lazada] TO date cell not found in left panel:', to);
-      }
+    if (dateInputs.length >= 2) {
+      typeIntoInput(dateInputs[0], fromStr);
+      await sleep(400);
+      typeIntoInput(dateInputs[1], toStr);
+      await sleep(400);
+      console.log('[OrderExporter-Lazada] Dates typed:', fromStr, '→', toStr);
+
     } else {
-      // Advance until right panel shows TO month (right = left + 1, so advance diff-1 extra times)
-      for (let i = 0; i < diff - 1; i++) {
-        const btn = document.querySelector('.next-calendar-panel-header-right .next-calendar-btn-next-month')
-                 || document.querySelector('.next-calendar-btn-next-month');
-        if (btn) fireClick(btn);
-        await sleep(400);
-      }
-      if (!clickDateInPanel('.next-calendar-body-right', to.day)) {
-        console.warn('[OrderExporter-Lazada] TO date cell not found in right panel:', to);
-      }
-    }
-    await sleep(400);
+      // FALLBACK: navigate the calendar and click date cells
+      console.log('[OrderExporter-Lazada] No date inputs found — falling back to calendar clicks');
+      await navigateToLeftMonth(from.year, from.month);
+      await sleep(400);
 
-    // 6. Click the confirm button "กำหนด"
+      clickDateInPanel('.next-calendar-body-left', from.day);
+      await sleep(600);
+
+      const diff = (to.year * 12 + to.month) - (from.year * 12 + from.month);
+      if (diff === 0) {
+        clickDateInPanel('.next-calendar-body-left', to.day);
+      } else {
+        for (let i = 0; i < diff - 1; i++) {
+          const btn = document.querySelector('.next-calendar-panel-header-right .next-calendar-btn-next-month')
+                   || document.querySelector('.next-calendar-btn-next-month');
+          if (btn) fireClick(btn);
+          await sleep(400);
+        }
+        clickDateInPanel('.next-calendar-body-right', to.day);
+      }
+      await sleep(400);
+    }
+
+    // 4. Click the confirm button "กำหนด"
     const footer = document.querySelector('.next-date-picker-panel-footer');
     const confirmBtn = footer
       ? [...footer.querySelectorAll('button')].find(b => b.textContent.trim() === 'กำหนด')
