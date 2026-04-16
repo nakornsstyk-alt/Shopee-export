@@ -661,8 +661,7 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
   async function setDateRange(from, to) {
     function pad(n) { return String(n).padStart(2, '0'); }
 
-    // SHORTCUT: for preset modes, just click the matching Thai tag button.
-    // This is far more reliable than using the date-picker calendar UI.
+    // SHORTCUT: for preset modes click the matching Thai tag directly.
     const PRESET_TAG = {
       'D-1':  'เมื่อวานนี้',
       'D-7':  'ผ่านมา7วัน',
@@ -673,73 +672,64 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
       const presetBtn = [...document.querySelectorAll('.next-tag-checkable')]
         .find(el => (el.querySelector('.next-tag-body') || el).textContent.trim() === presetLabel);
       if (presetBtn) {
-        fireClick(presetBtn);
+        presetBtn.click();
         console.log('[OrderExporter-Lazada] Preset tag clicked:', presetLabel, '✓');
         await sleep(600);
-        return true; // no กำหนด confirm needed for presets
+        return true;
       }
-      console.warn('[OrderExporter-Lazada] Preset tag not found:', presetLabel, '— falling through to custom picker');
+      console.warn('[OrderExporter-Lazada] Preset tag not found:', presetLabel, '— using custom picker');
     }
 
     // CUSTOM DATE RANGE
+    const fromStr = `${from.year}-${pad(from.month)}-${pad(from.day)}`;
+    const toStr   = `${to.year}-${pad(to.month)}-${pad(to.day)}`;
+
     // Step 1: activate "กำหนดเอง" tag
     const customTag = [...document.querySelectorAll('.next-tag-checkable')].find(el =>
       (el.querySelector('.next-tag-body') || el).textContent.trim().includes('กำหนดเอง')
     );
-    if (!customTag) {
-      console.warn('[OrderExporter-Lazada] Custom date tag not found');
-      return false;
-    }
-    fireClick(customTag);
+    if (!customTag) { console.warn('[OrderExporter-Lazada] Custom tag not found'); return false; }
+    customTag.click();
     await sleep(800);
 
-    // Step 2: open the range picker calendar
+    // Step 2: open calendar with a single .click() — NOT fireClick.
+    // fireClick fires mousedown+mouseup+click which can toggle the popup closed again.
     const trigger = document.querySelector('.next-range-picker-trigger');
-    if (!trigger) {
-      console.warn('[OrderExporter-Lazada] Date range trigger not found');
-      return false;
-    }
-    fireClick(trigger);
+    if (!trigger) { console.warn('[OrderExporter-Lazada] Trigger not found'); return false; }
+    trigger.click();
     await waitFor('.next-calendar-range', 5000).catch(() =>
-      console.warn('[OrderExporter-Lazada] Calendar did not open in time')
+      console.warn('[OrderExporter-Lazada] Calendar did not open')
     );
-    await sleep(800);
+    await sleep(600);
 
-    const fromStr = `${from.year}-${pad(from.month)}-${pad(from.day)}`;
-    const toStr   = `${to.year}-${pad(to.month)}-${pad(to.day)}`;
-
-    // Step 3: type dates into the YYYY-MM-DD inputs inside the picker panel
+    // Step 3: type dates using execCommand (generates real beforeinput/input events React accepts).
+    // The 2 input[placeholder="YYYY-MM-DD"] elements appear inside the picker popup.
     function typeIntoInput(el, value) {
+      el.click();
       el.focus();
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      nativeSetter.call(el, value);
-      el.dispatchEvent(new Event('input',  { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', code: 'Enter', bubbles: true }));
+      el.select();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, value);
+      console.log('[OrderExporter-Lazada] Input value after type:', el.value);
     }
 
-    // Try multiple selectors to locate the start/end date inputs
-    let dateInputs = [...new Set([
-      ...document.querySelectorAll('input[placeholder="YYYY-MM-DD"]'),
-      ...[...document.querySelectorAll('.next-calendar-range input, .next-date-picker-panel input')]
-        .filter(i => !(i.placeholder || '').includes(':')),
-    ])];
-    console.log('[OrderExporter-Lazada] Found', dateInputs.length, 'date input(s)');
+    const dateInputs = [...document.querySelectorAll('input[placeholder="YYYY-MM-DD"]')];
+    console.log('[OrderExporter-Lazada] Date inputs found:', dateInputs.length);
 
     if (dateInputs.length >= 2) {
-      fireClick(dateInputs[0]);
-      await sleep(300);
       typeIntoInput(dateInputs[0], fromStr);
       await sleep(500);
-      fireClick(dateInputs[1]);
+      // Tab to move focus to next field so React commits the first value
+      dateInputs[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', bubbles: true }));
       await sleep(300);
       typeIntoInput(dateInputs[1], toStr);
       await sleep(500);
+      dateInputs[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', code: 'Tab', bubbles: true }));
+      await sleep(500);
       console.log('[OrderExporter-Lazada] Dates typed:', fromStr, '→', toStr);
     } else {
-      // Last resort: click calendar cells
-      console.log('[OrderExporter-Lazada] No date inputs found — trying calendar cell clicks');
+      // Last resort: calendar cell clicks
+      console.warn('[OrderExporter-Lazada] No date inputs found — trying calendar cell clicks');
       await navigateToLeftMonth(from.year, from.month);
       await sleep(400);
       clickDateInPanel('.next-calendar-body-left', from.day);
