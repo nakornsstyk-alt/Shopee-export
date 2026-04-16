@@ -687,14 +687,47 @@ function lazadaExportFlow({ dateMode, dateFrom, dateTo, brandName, platformName 
     customTag.click();
     await sleep(800);
 
-    // Step 2: open calendar with a SINGLE .click() (fireClick toggle-closes the popup)
-    const trigger = document.querySelector('.next-range-picker-trigger');
-    if (!trigger) { console.warn('[OrderExporter-Lazada] Trigger not found'); return false; }
-    trigger.click();
-    await waitFor('.next-calendar-range', 5000).catch(() =>
-      console.warn('[OrderExporter-Lazada] Calendar slow to open')
-    );
-    await sleep(600);
+    // Step 2: open the calendar — try multiple strategies since trigger.click() may be ignored
+    async function openCalendar() {
+      if (document.querySelector('.next-calendar-range')) return true; // already open
+
+      const strategies = [
+        // a) Click the trigger element itself
+        () => document.querySelector('.next-range-picker-trigger')?.click(),
+        // b) Click the "วันที่เริ่มต้น" placeholder text element inside the trigger
+        () => {
+          const el = [...document.querySelectorAll('.next-range-picker-trigger *')]
+            .find(e => e.textContent.trim() === 'วันที่เริ่มต้น' && !e.children.length);
+          el?.click();
+        },
+        // c) Click any input inside the trigger
+        () => {
+          const inp = document.querySelector('.next-range-picker-trigger input');
+          if (inp) { inp.click(); inp.focus(); }
+        },
+        // d) Click the calendar icon inside the trigger
+        () => document.querySelector('.next-range-picker-trigger [class*="icon"], .next-range-picker-trigger [class*="calendar"]')?.click(),
+        // e) mousedown on trigger (some Fusion versions open on mousedown, not click)
+        () => document.querySelector('.next-range-picker-trigger')?.dispatchEvent(
+          new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })
+        ),
+      ];
+
+      for (const fn of strategies) {
+        fn();
+        await sleep(600);
+        if (document.querySelector('.next-calendar-range')) {
+          console.log('[OrderExporter-Lazada] Calendar opened ✓');
+          return true;
+        }
+      }
+      console.warn('[OrderExporter-Lazada] Could not open calendar after all strategies');
+      return false;
+    }
+
+    const calendarOpened = await openCalendar();
+    if (!calendarOpened) return false;
+    await sleep(400);
 
     // Step 3: click date cells using td[title="YYYY-MM-DD"].
     // DOM inspection confirmed every cell has title="YYYY-MM-DD" — no left/right panel logic needed.
