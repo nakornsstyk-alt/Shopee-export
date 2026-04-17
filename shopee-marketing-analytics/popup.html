@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shopee Ads Analytics</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 380px;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-size: 13px;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #ee4d2d, #c0392b);
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .header .sub {
+      font-size: 11px;
+      color: rgba(255,255,255,0.75);
+    }
+
+    .body { padding: 14px 16px; }
+
+    .section { margin-bottom: 14px; }
+    .label {
+      font-size: 11px;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .date-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .date-row input[type="date"] {
+      flex: 1;
+      background: #16213e;
+      border: 1px solid #2d3561;
+      color: #e0e0e0;
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 12px;
+      outline: none;
+    }
+    .date-row input[type="date"]:focus {
+      border-color: #ee4d2d;
+    }
+    .date-row .sep { color: #666; font-size: 12px; }
+
+    .presets {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .preset-btn {
+      background: #16213e;
+      border: 1px solid #2d3561;
+      color: #bbb;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .preset-btn:hover { border-color: #ee4d2d; color: #fff; }
+
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary { background: #ee4d2d; color: #fff; }
+    .btn-primary:not(:disabled):hover { background: #d03b1d; }
+    .btn-secondary {
+      background: #16213e;
+      border: 1px solid #2d3561;
+      color: #ccc;
+      margin-top: 8px;
+    }
+    .btn-secondary:not(:disabled):hover { border-color: #ee4d2d; color: #fff; }
+    .btn-danger {
+      background: transparent;
+      border: 1px solid #555;
+      color: #888;
+      margin-top: 6px;
+      font-size: 12px;
+      padding: 7px;
+    }
+    .btn-danger:not(:disabled):hover { border-color: #c0392b; color: #e74c3c; }
+
+    .status-box {
+      background: #16213e;
+      border: 1px solid #2d3561;
+      border-radius: 6px;
+      padding: 10px 12px;
+      min-height: 48px;
+    }
+    .status-icon { display: inline-block; margin-right: 6px; }
+    .status-text { font-size: 12px; line-height: 1.5; }
+    .status-text.running { color: #f39c12; }
+    .status-text.success { color: #2ecc71; }
+    .status-text.error { color: #e74c3c; }
+    .status-text.idle { color: #777; }
+
+    .progress-bar-wrap {
+      background: #0d1117;
+      border-radius: 4px;
+      height: 6px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #ee4d2d, #f39c12);
+      border-radius: 4px;
+      transition: width 0.4s ease;
+      width: 0%;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .stat-box {
+      background: #0d1117;
+      border-radius: 6px;
+      padding: 8px;
+      text-align: center;
+    }
+    .stat-val { font-size: 18px; font-weight: 700; color: #ee4d2d; }
+    .stat-lbl { font-size: 10px; color: #666; margin-top: 2px; }
+
+    .divider { border: none; border-top: 1px solid #1e2a40; margin: 12px 0; }
+
+    .footer {
+      padding: 8px 16px;
+      background: #0d1117;
+      text-align: center;
+      font-size: 10px;
+      color: #444;
+    }
+
+    /* spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid #f39c12;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="h1" style="font-size:15px;font-weight:600;color:#fff;">Shopee Ads Analytics</div>
+      <div class="sub">Hourly CPC performance capture</div>
+    </div>
+  </div>
+
+  <div class="body">
+
+    <!-- Date range -->
+    <div class="section">
+      <div class="label">Date Range</div>
+      <div class="date-row">
+        <input type="date" id="dateFrom" />
+        <span class="sep">→</span>
+        <input type="date" id="dateTo" />
+      </div>
+      <div class="presets">
+        <button class="preset-btn" data-preset="today">Today</button>
+        <button class="preset-btn" data-preset="yesterday">Yesterday</button>
+        <button class="preset-btn" data-preset="7d">Last 7 days</button>
+        <button class="preset-btn" data-preset="30d">Last 30 days</button>
+        <button class="preset-btn" data-preset="thismonth">This month</button>
+      </div>
+    </div>
+
+    <!-- Capture button -->
+    <button class="btn btn-primary" id="captureBtn">Start Capture</button>
+
+    <hr class="divider" />
+
+    <!-- Status -->
+    <div class="section">
+      <div class="label">Status</div>
+      <div class="status-box">
+        <span id="statusText" class="status-text idle">Ready — select a date range and click Start Capture.</span>
+        <div class="progress-bar-wrap" id="progressWrap" style="display:none">
+          <div class="progress-bar" id="progressBar"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats">
+      <div class="stat-box">
+        <div class="stat-val" id="statDays">0</div>
+        <div class="stat-lbl">Days</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="statRows">0</div>
+        <div class="stat-lbl">Hourly rows</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="statOrders">0</div>
+        <div class="stat-lbl">Total orders</div>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <!-- Export / Clear -->
+    <button class="btn btn-secondary" id="exportBtn" disabled>Export CSV</button>
+    <button class="btn btn-danger" id="clearBtn" disabled>Clear collected data</button>
+
+  </div>
+
+  <div class="footer">seller.shopee.sg · Hourly data, always day-by-day</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
