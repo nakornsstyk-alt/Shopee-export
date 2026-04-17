@@ -93,96 +93,100 @@ function sleep(ms) {
 
 // ─── Data parsing ─────────────────────────────────────────────────────────────
 
-// Try to extract hourly rows from any of the captured API responses for a given date.
-// Returns array of row objects, or [] if no parseable data found.
+// Shopee API unit conventions (confirmed from wallet/topup values in production):
+//   monetary fields (cost, broad_gmv, etc.): stored as integer × 100000 → divide by 100000 for SGD
+//   ctr: stored as decimal (0.01857) → multiply by 100 for %
+//   broad_roi (ROAS): stored as integer × 100000 → divide by 100000 for actual ROAS
+//   counts (impression, click, broad_order, broad_order_amount): raw integers, no conversion
+
 function parseHourlyRows(responses, dateStr) {
+  // Priority: the get_time_graph endpoint is the chart data source
+  const tg = responses.find(r => r.url.includes('get_time_graph'));
+  if (tg) {
+    const rows = parseTimeGraph(tg.data, dateStr);
+    if (rows && rows.length > 0) return rows;
+  }
+  // Fallback for any other structure
   for (const resp of responses) {
-    const rows = tryExtractRows(resp.data, dateStr);
+    const rows = parseTimeGraph(resp.data, dateStr);
     if (rows && rows.length > 0) return rows;
   }
   return [];
 }
 
-function tryExtractRows(data, dateStr) {
-  if (!data) return null;
+// Parses /api/pas/v1/report/get_time_graph/ response.
+// Structure: { data: { key, report_by_time: [ { key: "unix_ts", metrics: {...} } ] } }
+function parseTimeGraph(data, dateStr) {
+  const reportByTime = data?.data?.report_by_time;
+  if (!Array.isArray(reportByTime) || reportByTime.length === 0) return null;
 
-  // Shopee API typically wraps data in data.data or data.response
-  const payload = data.data || data.response || data;
+  return reportByTime.map(point => {
+    const m = point.metrics || {};
+    // key is a Unix timestamp string; derive SGT (UTC+8) hour
+    const ts = Number(point.key);
+    const hourSGT = isNaN(ts) ? 0 : ((Math.floor(ts / 3600) + 8) % 24);
+    const hour = String(hourSGT).padStart(2, '0') + ':00';
 
-  // Look for a trend/hourly array anywhere in the payload
-  const hourlyArr = findHourlyArray(payload);
-  if (!hourlyArr) return null;
-
-  return hourlyArr.map((point, idx) => {
-    const hour = String(idx).padStart(2, '0') + ':00';
     return {
       date: dateStr,
       hour,
-      impressions: safeNum(point, ['impression', 'impressions', 'imp']),
-      clicks: safeNum(point, ['click', 'clicks']),
-      ctr_pct: safeFloat(point, ['ctr', 'click_through_rate']),
-      items_sold: safeNum(point, ['item_sold', 'items_sold', 'item_sold_count', 'sold']),
-      orders: safeNum(point, ['order', 'orders', 'order_count', 'order_num']),
-      sales_gmv: safeFloat(point, ['gmv', 'sales', 'revenue', 'sale', 'gmv_from_ads']),
-      expense: safeFloat(point, ['expense', 'cost', 'spend', 'ad_cost', 'ad_expense']),
-      roas: safeFloat(point, ['roas', 'return_on_ad_spend']),
+      impressions:  iv(m, 'impression', 'impressions'),
+      clicks:       iv(m, 'click', 'clicks'),
+      ctr_pct:      pv(m, 'ctr'),
+      items_sold:   iv(m, 'broad_order_amount', 'item_sold', 'items_sold'),
+      orders:       iv(m, 'broad_order', 'order', 'orders'),
+      sales_gmv:    mv(m, 'broad_gmv', 'gmv'),
+      expense:      mv(m, 'cost', 'expense'),
+      roas:         rv(m, 'broad_roi', 'roas'),
+      // extra fields available from the API
+      direct_orders: iv(m, 'direct_order'),
+      direct_gmv:    mv(m, 'direct_gmv'),
+      checkout:      iv(m, 'checkout'),
+      cpc:           mv(m, 'cpc'),
     };
   });
 }
 
-// Walk the object tree looking for an array that looks like hourly data points.
-function findHourlyArray(obj, depth) {
-  if (depth === undefined) depth = 0;
-  if (depth > 5 || !obj || typeof obj !== 'object') return null;
-
-  if (Array.isArray(obj)) {
-    // An hourly array for one day should have 24 entries (or at least 8)
-    if (obj.length >= 8 && typeof obj[0] === 'object') {
-      // Check if entries look like metrics (have numeric values)
-      const sample = obj[0];
-      const vals = Object.values(sample).filter(v => typeof v === 'number');
-      if (vals.length >= 2) return obj;
-    }
-    return null;
-  }
-
-  // Check well-known key names first
-  const priorityKeys = ['hourly_data', 'trend_data', 'chart_data', 'hourly', 'trend', 'series', 'data_list'];
-  for (const k of priorityKeys) {
-    if (obj[k]) {
-      const found = findHourlyArray(obj[k], depth + 1);
-      if (found) return found;
-    }
-  }
-
-  // Recurse into all keys
-  for (const key of Object.keys(obj)) {
-    const found = findHourlyArray(obj[key], depth + 1);
-    if (found) return found;
-  }
-
-  return null;
-}
-
-function safeNum(obj, keys) {
-  for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== null) return Number(obj[k]) || 0;
-    // Try snake_case variants already covered; also try camelCase
-    const camel = k.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-    if (obj[camel] !== undefined) return Number(obj[camel]) || 0;
+// integer value (counts: impressions, clicks, orders, items_sold)
+function iv(obj) {
+  for (let i = 1; i < arguments.length; i++) {
+    const k = arguments[i];
+    if (obj[k] != null) return Math.round(Number(obj[k])) || 0;
   }
   return 0;
 }
 
-function safeFloat(obj, keys) {
-  const n = safeNum(obj, keys);
-  return Math.round(n * 10000) / 10000;
+// monetary value (SGD): Shopee stores as integer × 100000
+function mv(obj) {
+  for (let i = 1; i < arguments.length; i++) {
+    const k = arguments[i];
+    if (obj[k] != null) return Math.round(Number(obj[k])) / 100000;
+  }
+  return 0;
+}
+
+// percentage value: Shopee stores CTR as decimal (0.01857 → 1.857%)
+function pv(obj) {
+  for (let i = 1; i < arguments.length; i++) {
+    const k = arguments[i];
+    if (obj[k] != null) return Math.round(Number(obj[k]) * 10000) / 100;
+  }
+  return 0;
+}
+
+// ROAS value: Shopee stores as integer × 100000 (e.g. 484000 → 4.84)
+function rv(obj) {
+  for (let i = 1; i < arguments.length; i++) {
+    const k = arguments[i];
+    if (obj[k] != null) return Math.round(Number(obj[k])) / 100000;
+  }
+  return 0;
 }
 
 // ─── CSV export ───────────────────────────────────────────────────────────────
 
 function rowsToCSV(rows) {
-  const headers = ['date', 'hour', 'impressions', 'clicks', 'ctr_pct', 'items_sold', 'orders', 'sales_gmv', 'expense', 'roas'];
+  const headers = ['date', 'hour', 'impressions', 'clicks', 'ctr_pct', 'items_sold', 'orders', 'sales_gmv', 'expense', 'roas', 'direct_orders', 'direct_gmv', 'checkout', 'cpc'];
   const lines = [headers.join(',')];
   for (const r of rows) {
     lines.push(headers.map(h => r[h] !== undefined ? r[h] : '').join(','));
