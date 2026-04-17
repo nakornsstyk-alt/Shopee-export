@@ -143,7 +143,7 @@ function parseTimeGraph(data, dateStr) {
     const hour = String(hourSGT).padStart(2, '00') + ':00';
 
     return {
-      date: dateStr,
+      date: Number(dateStr.replace(/-/g, '')),
       hour,
       impressions:   iv(m, 'impression', 'impressions'),
       clicks:        iv(m, 'click', 'clicks'),
@@ -265,7 +265,7 @@ async function startCapture(dateFrom, dateTo) {
         // Store empty rows for this day so the user sees the gap
         for (let h = 0; h < 24; h++) {
           captureState.rows.push({
-            date: dateStr,
+            date: Number(dateStr.replace(/-/g, '')),
             hour: String(h).padStart(2, '0') + ':00',
             impressions: 0, clicks: 0, ctr_pct: 0,
             items_sold: 0, orders: 0, sales_gmv: 0,
