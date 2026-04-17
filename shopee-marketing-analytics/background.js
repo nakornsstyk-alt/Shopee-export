@@ -5,7 +5,7 @@ const MARKETING_BASE = 'https://seller.shopee.sg/portal/marketing/pas/index';
 // Preserve the offset param from the known working URL; 616 appears in production URLs.
 const URL_OFFSET = 616;
 const DELAY_BETWEEN_DAYS_MS = 2500;
-const DATA_WAIT_TIMEOUT_MS = 20000;
+const DATA_WAIT_TIMEOUT_MS = 30000;
 const DATA_POLL_INTERVAL_MS = 500;
 
 // ─── Timestamp helpers ───────────────────────────────────────────────────────
@@ -80,10 +80,13 @@ async function waitForData(tabId) {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId },
       func: getPageResponses,
-      world: 'MAIN', // must match where intercept.js writes window.__shopeeAdsResponses__
+      world: 'MAIN',
     });
     const responses = result?.result || [];
-    if (responses.length > 0) return responses;
+    // Only return once the chart data endpoint has responded — other API calls
+    // (translations, config, banners) arrive much earlier and must not trigger early exit.
+    const hasChartData = responses.some(r => r.url.includes('get_time_graph'));
+    if (hasChartData) return responses;
   }
   return [];
 }
