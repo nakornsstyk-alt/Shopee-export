@@ -140,27 +140,22 @@ function parseTimeGraph(data, dateStr) {
     const m = point.metrics || {};
     const ts = Number(point.key);
     const hourSGT = ((Math.floor(ts / 3600) + 8) % 24);
-    const hour = String(hourSGT).padStart(2, '0') + ':00';
+    const hour = String(hourSGT).padStart(2, '00') + ':00';
 
     return {
       date: dateStr,
       hour,
-      impressions:    iv(m, 'impression', 'impressions'),
-      clicks:         iv(m, 'click', 'clicks'),
-      ctr_pct:        pv(m, 'ctr'),
-      items_sold:     iv(m, 'broad_order_amount', 'item_sold', 'items_sold'),
-      // orders = checkout: matches dashboard "Orders" (confirmed attribution)
-      orders:         iv(m, 'checkout'),
-      sales_gmv:      mv(m, 'broad_gmv', 'gmv'),
-      expense:        mv(m, 'cost', 'expense'),
-      roas:           rv(m, 'broad_roi', 'roas'),
-      // broad_orders: slightly wider attribution than dashboard Orders (broad_order field)
-      broad_orders:   iv(m, 'broad_order'),
-      // direct: buyer clicked YOUR specific ad and bought THAT exact product (~7d window)
-      // broad includes anyone who clicked any ad and bought anything (~30d window)
-      direct_orders:  iv(m, 'direct_order'),
-      direct_gmv:     mv(m, 'direct_gmv'),
-      cpc:            mv(m, 'cpc'),
+      impressions:   iv(m, 'impression', 'impressions'),
+      clicks:        iv(m, 'click', 'clicks'),
+      ctr_pct:       pv(m, 'ctr'),
+      items_sold:    iv(m, 'broad_order_amount', 'item_sold', 'items_sold'),
+      order:         iv(m, 'checkout'),
+      sales_gmv:     mv(m, 'broad_gmv', 'gmv'),
+      expense:       mv(m, 'cost', 'expense'),
+      roas:          rv(m, 'broad_roi', 'roas'),
+      broad_orders:  iv(m, 'broad_order'),
+      direct_orders: iv(m, 'direct_order'),
+      direct_gmv:    mv(m, 'direct_gmv'),
     };
   });
 }
@@ -204,7 +199,7 @@ function rv(obj) {
 // ─── CSV export ───────────────────────────────────────────────────────────────
 
 function rowsToCSV(rows) {
-  const headers = ['date', 'hour', 'impressions', 'clicks', 'ctr_pct', 'items_sold', 'orders', 'sales_gmv', 'expense', 'roas', 'broad_orders', 'direct_orders', 'direct_gmv', 'cpc'];
+  const headers = ['date', 'hour', 'impressions', 'clicks', 'ctr_pct', 'items_sold', 'order', 'sales_gmv', 'expense', 'roas', 'broad_orders', 'direct_orders', 'direct_gmv'];
   const lines = [headers.join(',')];
   for (const r of rows) {
     lines.push(headers.map(h => r[h] !== undefined ? r[h] : '').join(','));
