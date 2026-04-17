@@ -79,6 +79,7 @@ async function waitForData(tabId) {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId },
       func: getPageResponses,
+      world: 'MAIN', // must match where intercept.js writes window.__shopeeAdsResponses__
     });
     const responses = result?.result || [];
     if (responses.length > 0) return responses;
@@ -223,19 +224,25 @@ async function startCapture(dateFrom, dateTo) {
 
       notifyPopup({ type: 'progress', current: i + 1, total: days.length, date: dateStr, rowsCollected: captureState.rows.length });
 
+      // Clear BEFORE navigating so we don't erase data captured during page load.
+      // (clear also runs in MAIN world so it reaches the same window as the intercept)
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: captureState.tabId },
+          func: clearPageResponses,
+          world: 'MAIN',
+        });
+      } catch (_) { /* tab may not be on seller.shopee.sg yet — safe to ignore */ }
+
       await navigateTab(captureState.tabId, url);
 
-      // Give the intercept script a moment to set up after page load
-      await sleep(500);
-
-      // Clear previous day's buffer
-      await chrome.scripting.executeScript({
-        target: { tabId: captureState.tabId },
-        func: clearPageResponses,
-      });
-
-      // Wait for API data to arrive
+      // Wait for API data to arrive (intercept captures calls made during/after page load)
       const responses = await waitForData(captureState.tabId);
+
+      // Always save raw responses so field names can be inspected if values are wrong
+      if (responses.length > 0) {
+        await chrome.storage.local.set({ lastRawResponses: responses.slice(0, 3) });
+      }
 
       if (responses.length === 0) {
         // Store empty rows for this day so the user sees the gap
@@ -253,9 +260,8 @@ async function startCapture(dateFrom, dateTo) {
         if (dayRows.length > 0) {
           captureState.rows.push(...dayRows);
         } else {
-          // Fallback: store raw response for debugging
-          await chrome.storage.local.set({ lastRawResponses: responses.slice(0, 3) });
-          // Fill zeros so row count stays consistent
+          // Parsing succeeded at capturing but couldn't map fields — fill zeros.
+          // Check chrome.storage.local → lastRawResponses to see actual API field names.
           for (let h = 0; h < 24; h++) {
             captureState.rows.push({
               date: dateStr,
