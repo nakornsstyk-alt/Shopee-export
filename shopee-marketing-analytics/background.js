@@ -120,15 +120,26 @@ function parseHourlyRows(responses, dateStr) {
 
 // Parses /api/pas/v1/report/get_time_graph/ response.
 // Structure: { data: { key, report_by_time: [ { key: "unix_ts", metrics: {...} } ] } }
+// The API returns whatever the page's stored date config is (could be 2+ days),
+// so we filter strictly to the 24 entries that fall within the target day in SGT.
 function parseTimeGraph(data, dateStr) {
   const reportByTime = data?.data?.report_by_time;
   if (!Array.isArray(reportByTime) || reportByTime.length === 0) return null;
 
-  return reportByTime.map(point => {
-    const m = point.metrics || {};
-    // key is a Unix timestamp string; derive SGT (UTC+8) hour
+  const dayStart = dateStrToUnixSGT(dateStr);       // 00:00 SGT of target day
+  const dayEnd   = dayStart + 86399;                // 23:59:59 SGT of target day
+
+  const dayEntries = reportByTime.filter(point => {
     const ts = Number(point.key);
-    const hourSGT = isNaN(ts) ? 0 : ((Math.floor(ts / 3600) + 8) % 24);
+    return !isNaN(ts) && ts >= dayStart && ts <= dayEnd;
+  });
+
+  if (dayEntries.length === 0) return null;
+
+  return dayEntries.map(point => {
+    const m = point.metrics || {};
+    const ts = Number(point.key);
+    const hourSGT = ((Math.floor(ts / 3600) + 8) % 24);
     const hour = String(hourSGT).padStart(2, '0') + ':00';
 
     return {
