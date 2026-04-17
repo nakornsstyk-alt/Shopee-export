@@ -24,13 +24,14 @@ function buildDayUrl(dateStr) {
 }
 
 // Returns array of "YYYY-MM-DD" strings from dateFrom to dateTo inclusive.
+// Uses UTC noon to avoid local-timezone date shifts when calling toISOString().
 function enumerateDays(dateFrom, dateTo) {
   const days = [];
-  const cur = new Date(dateFrom + 'T00:00:00');
-  const end = new Date(dateTo + 'T00:00:00');
+  const cur = new Date(dateFrom + 'T12:00:00Z');
+  const end = new Date(dateTo + 'T12:00:00Z');
   while (cur <= end) {
     days.push(cur.toISOString().slice(0, 10));
-    cur.setDate(cur.getDate() + 1);
+    cur.setUTCDate(cur.getUTCDate() + 1);
   }
   return days;
 }
