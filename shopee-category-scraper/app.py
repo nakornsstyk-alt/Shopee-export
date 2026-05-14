@@ -145,26 +145,56 @@ def scrape_shopee_category(category_url: str, log_fn, max_pages: int = MAX_PAGES
                     continue
             return None, 0
 
+        def wait_for_any_card(pg, timeout_ms=20000):
+            """Poll until one of CARD_SELECTORS yields >4 elements, or timeout."""
+            deadline = time.time() + timeout_ms / 1000.0
+            while time.time() < deadline:
+                sel, count = find_cards(pg)
+                if sel:
+                    return sel, count
+                time.sleep(0.5)
+            return None, 0
+
         for page_num in range(max_pages):
             url = build_category_url(parsed, page_num)
             log_fn(f"📄 Page {page_num + 1}/{max_pages} → {url}")
 
-            page.goto(url, wait_until="networkidle", timeout=40000)
-            time.sleep(2.5)   # let React hydrate
+            # Shopee fires continuous tracking requests, so 'networkidle' never
+            # resolves and goto() hangs the full timeout. Use 'domcontentloaded'
+            # and then explicitly wait for product cards to appear.
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log_fn(f"  ⚠️  Navigation issue: {e}. Continuing anyway…")
+
+            log_fn("  ⏳ Waiting for product cards…")
+            card_sel, card_count = wait_for_any_card(page, timeout_ms=20000)
+            if not card_sel:
+                snippet = ""
+                try:
+                    snippet = page.evaluate("document.body.innerText.slice(0, 200)")
+                except Exception:
+                    pass
+                log_fn(f"  ⚠️  No cards found on page {page_num + 1}.")
+                if snippet:
+                    log_fn(f"      Page text: {snippet[:150]}")
+                if page_num == 0:
+                    log_fn("  💡 Tip: Make sure you're logged in to shopee.co.th in the debug Chrome window.")
+                break
 
             # scroll to load all lazy images / cards
             for _ in range(8):
-                page.mouse.wheel(0, 1000)
+                try:
+                    page.evaluate("window.scrollBy(0, 1000)")
+                except Exception:
+                    break
                 time.sleep(0.35)
-            time.sleep(1.5)
+            time.sleep(1.2)
 
+            # cards may have grown after scrolling — re-detect selector/count
             card_sel, card_count = find_cards(page)
             if not card_sel:
-                snippet = page.evaluate("document.body.innerText.slice(0, 200)")
-                log_fn(f"  ⚠️  No cards found on page {page_num + 1}.")
-                log_fn(f"      Page text: {snippet[:150]}")
-                if page_num == 0:
-                    log_fn("  💡 Tip: Make sure you're logged in to shopee.co.th in the debug Chrome window.")
+                log_fn(f"  ⚠️  Cards disappeared after scroll on page {page_num + 1}.")
                 break
 
             log_fn(f"  🔎 Selector '{card_sel}' matched {card_count} cards")
