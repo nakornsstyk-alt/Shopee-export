@@ -1,8 +1,8 @@
-# Shopee Scraper — Category Edition (Windows)
+# Shopee Scraper — Category / Keyword Edition (Windows)
 
-Paste a Shopee **category URL** and the app scrapes **9 pages** of products,
-respecting whatever sort order is in the URL (defaults to `sortBy=sales` /
-สินค้าขายดี if missing).
+Paste a Shopee **category URL**, a Shopee **search URL**, or just a plain
+**keyword**, and the app scrapes **9 pages** of products, respecting whatever
+sort order is in the URL (defaults to `sortBy=sales` / สินค้าขายดี if missing).
 
 **Collects:** Rank · Product Name · Link · Stars · Price (฿) · Qty Sold / Month
 
@@ -28,9 +28,11 @@ Double-click: launch.bat
 ```
 
 ### 4. Use the app
-1. Paste a Shopee category URL, e.g.
+1. Paste any of the following:
 
-   `https://shopee.co.th/เครื่องสำอางสำหรับผิวหน้า-cat.11044959.11045208?page=0&sortBy=sales`
+   - A category URL — `https://shopee.co.th/เครื่องสำอางสำหรับผิวหน้า-cat.11044959.11045208?page=0&sortBy=sales`
+   - A search URL — `https://shopee.co.th/search?keyword=นมผง`
+   - A plain keyword — `นมผง`
 
 2. Pick number of pages (1–9, default 9)
 3. Click **▶ Start Scraping**
@@ -41,12 +43,13 @@ Double-click: launch.bat
 
 ## How URLs are walked
 
-The URL you paste is treated as a template:
+The input is turned into a URL template:
 
+- A plain keyword is turned into a `shopee.co.th/search?keyword=...` URL
 - `page=` is replaced with `0, 1, 2, …` up to the page count you chose
 - `sortBy=` is preserved (or set to `sales` if missing)
 - Any other query parameters (filters, etc.) are kept as-is
-- The category ID (`cat.XXXX.YYYY` portion) is used to name the Sheet tab / CSV file
+- The category ID (`cat.XXXX.YYYY`) or the keyword text is used to name the Sheet tab / CSV file
 
 ---
 
@@ -78,7 +81,8 @@ shopee-category-scraper/
 
 - Connects to **your real Chrome** via CDP (port 9222) — Chrome handles all
   Shopee authentication tokens automatically
-- Iterates `page=0..8` (9 pages) on the category URL you paste
+- Iterates `page=0..8` (9 pages) on the category/search URL you paste (or the
+  search URL built from your keyword)
 - Scrolls each page to trigger lazy loading
 - Reads rendered HTML via `page.evaluate()` JS — no API calls, no bot
   detection issues
@@ -91,7 +95,7 @@ shopee-category-scraper/
 
 | Problem | Fix |
 |---|---|
-| "Invalid URL" / "missing -cat." | Make sure you copied the category page URL (must contain `-cat.<numbers>`), not a search URL |
+| "URL is not a category page... / not a search page..." | Paste a category URL (`-cat.<numbers>`), a search URL (`?keyword=...`), or a plain keyword |
 | "Cannot connect to Chrome" | Run `start_chrome_debug.bat` first |
 | 0 products found | Make sure you're logged in to Shopee in the debug Chrome window |
 | credentials.json error | Re-download JSON key from Google Cloud Console |
