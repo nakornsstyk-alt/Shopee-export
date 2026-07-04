@@ -25,8 +25,38 @@ SHEET_ID     = "1XGS24NGtbHiXKk2noescba6KBK4nxKU2Y5KMa6RxRTI"
 CREDS_FILE   = "credentials.json"
 MAX_PAGES    = 9
 SHOPEE_BASE  = "https://shopee.co.th"
+PROMO_PHRASES_FILE = "promo_phrases.txt"
 
 HEADERS = ["Rank", "Name", "Link", "Stars", "Price (฿)", "Qty Sold / Month"]
+
+# Fallback phrases used only if promo_phrases.txt is missing/empty.
+DEFAULT_PROMO_PHRASES = [
+    "แถม", "รับสินค้าฟรี", "ขายส่ง", "ส่งฟรี", "โค้ดส่วนลด", "คูปองส่วนลด",
+    "คุ้มกว่าเดิม", "ลดสูงสุด", "ดีลเด็ด", "flash sale", "voucher",
+]
+
+
+def load_promo_phrases() -> list:
+    """Literal substrings that mark a card's matched text as a promo badge
+    rather than the product name (e.g. "ขายส่ง", "ส่งฟรี").
+
+    These are read from promo_phrases.txt next to this script — one phrase
+    per line, '#' for comments — so new badge wording Shopee introduces can
+    be added without touching this file. Numeric "buy N get discount"
+    badges (e.g. "ซื้อ 2 ชิ้น ลด ฿1") don't need an entry here; they're
+    caught by the generic pattern in the scraper regardless of wording.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), PROMO_PHRASES_FILE)
+    if not os.path.exists(path):
+        return DEFAULT_PROMO_PHRASES
+    phrases = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            phrases.append(line)
+    return phrases or DEFAULT_PROMO_PHRASES
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -136,6 +166,8 @@ def scrape_shopee_listing(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
     else:
         log_fn(f"🔍 Keyword: {parsed['label']}")
 
+    promo_phrases_json = json.dumps(load_promo_phrases(), ensure_ascii=False)
+
     results = []
 
     with sync_playwright() as p:
@@ -205,7 +237,9 @@ def scrape_shopee_listing(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
                 "    const anchor = item.querySelector(\"a[href]\");\n"
                 "    const rawHref = anchor ? anchor.getAttribute(\"href\") : \"\";\n"
                 "    const link = rawHref ? (rawHref.startsWith(\"http\") ? rawHref : \"https://shopee.co.th\" + rawHref) : \"\";\n"
-                "    const promoRe = /(ซื้อ\\s*\\d+\\s*ชิ้น|ลด\\s*฿?\\s*\\d|แถม|รับสินค้าฟรี|ขายส่ง|ส่งฟรี|โค้ดส่วนลด|คูปองส่วนลด|ช้อป[^\\n]{0,15}คุ้ม|คุ้มกว่าเดิม|ยิ่งซื้อยิ่ง(คุ้ม|ได้)|ลดสูงสุด|ดีลเด็ด|flash\\s*sale|voucher)/i;\n"
+                "    const PROMO_PHRASES = " + promo_phrases_json + ";\n"
+                "    const genericPromoRe = /(ซื้อ\\s*\\d+\\s*ชิ้น|ลด\\s*฿?\\s*\\d|ช้อป[^\\n]{0,15}คุ้ม|ยิ่งซื้อยิ่ง(คุ้ม|ได้)|flash\\s*sale|voucher)/i;\n"
+                "    const isPromoText = t => genericPromoRe.test(t) || PROMO_PHRASES.some(p => t.toLowerCase().includes(p.toLowerCase()));\n"
                 "    const nameSelectors = ['[data-sqe=\"name\"]', '[class*=\"item-name\"]', '[class*=\"itemName\"]', '[class*=\"ellipsis\"]', '[class*=\"name\"]'];\n"
                 "    let name = \"\";\n"
                 "    {\n"
@@ -216,12 +250,12 @@ def scrape_shopee_listing(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
                 "          const t = el.innerText.trim();\n"
                 "          if (!t || seen.has(t)) continue;\n"
                 "          seen.add(t);\n"
-                "          if (!promoRe.test(t) && t.length > best.length) best = t;\n"
+                "          if (!isPromoText(t) && t.length > best.length) best = t;\n"
                 "        }\n"
                 "      }\n"
                 "      name = best;\n"
                 "    }\n"
-                "    if (!name && anchor) { name = anchor.innerText.trim().split(\"\\n\").map(l=>l.trim()).filter(l=>l.length>8 && !promoRe.test(l))[0]||\"\" }\n"
+                "    if (!name && anchor) { name = anchor.innerText.trim().split(\"\\n\").map(l=>l.trim()).filter(l=>l.length>8 && !isPromoText(l))[0]||\"\" }\n"
                 "    let stars = \"\";\n"
                 "    for (const el of item.querySelectorAll(\"span,div\")) { const t=el.innerText.trim(); if(/^[1-5](\\.[0-9])?$/.test(t)){stars=t;break;} }\n"
                 "    const fullText = item.innerText;\n"

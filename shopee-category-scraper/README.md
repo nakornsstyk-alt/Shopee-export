@@ -68,6 +68,7 @@ The input is turned into a URL template:
 ```
 shopee-category-scraper/
   app.py                  ← main app
+  promo_phrases.txt        ← editable list of promo-badge phrases to ignore
   setup.bat               ← one-time installer
   launch.bat              ← run the app
   start_chrome_debug.bat  ← start Chrome with CDP
@@ -88,6 +89,18 @@ shopee-category-scraper/
   detection issues
 - Extracts stars, price, and sold count using partial class matching
   (`[class*="..."]`) since Shopee uses generated class names
+- Product name candidates come from several selectors, then Shopee's
+  in-card marketing badges (e.g. "ซื้อ 2 ชิ้น ลด ฿1", "ช้อปเพิ่มคุ้มกว่า",
+  "ส่งฟรี") are filtered out: numeric "buy N get discount" badges are
+  caught automatically by pattern regardless of wording, and everything
+  else is matched against `promo_phrases.txt` — the longest surviving
+  candidate wins
+
+### If a promo badge still shows up as the item name
+
+Open `promo_phrases.txt`, add the exact badge text on its own line, save,
+and re-scrape — no code changes needed. See the comments at the top of
+that file for the format.
 
 ---
 
