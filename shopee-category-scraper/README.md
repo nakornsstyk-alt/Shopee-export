@@ -1,10 +1,16 @@
 # Shopee Scraper — Category / Keyword Edition (Windows)
 
-Paste a Shopee **category URL**, a Shopee **search URL**, or just a plain
-**keyword**, and the app scrapes **9 pages** of products, respecting whatever
-sort order is in the URL (defaults to `sortBy=sales` / สินค้าขายดี if missing).
+Paste a Shopee **category URL**, a Shopee **search URL**, a plain **keyword**,
+or **multiple keywords separated by commas**, and the app scrapes **9 pages**
+per input, respecting whatever sort order is in the URL (defaults to
+`sortBy=sales` / สินค้าขายดี if missing).
 
-**Collects:** Rank · Product Name · Link · Stars · Price (฿) · Qty Sold / Month
+All inputs' results land in one combined table/export — each row tagged with
+the **Keyword** column that produced it, and rank restarting at 1 for every
+keyword (so "rank 3" always means 3rd place for that keyword's own search,
+not 3rd overall).
+
+**Collects:** Rank · Keyword · Product Name · Link · Stars · Price (฿) · Qty Sold / Month
 
 ---
 
@@ -33,23 +39,35 @@ Double-click: launch.bat
    - A category URL — `https://shopee.co.th/เครื่องสำอางสำหรับผิวหน้า-cat.11044959.11045208?page=0&sortBy=sales`
    - A search URL — `https://shopee.co.th/search?keyword=นมผง`
    - A plain keyword — `นมผง`
+   - **Multiple keywords, comma-separated** — `นมผง, ยาสีฟัน, ผงซักฟอก` (each
+     runs as its own search, one after another, over the same Chrome
+     connection; you can mix category URLs and keywords in the same list)
 
-2. Pick number of pages (1–9, default 9)
+2. Pick number of pages (1–9, default 9) — applies to each input
 3. Click **▶ Start Scraping**
 4. Double-click any row to open the product link
-5. Export via **💾 Export CSV** or **📊 Push to Google Sheets**
+5. Export via **💾 Export CSV** or **📊 Push to Google Sheets** — everything
+   goes into one file/tab, with a **Keyword** column identifying which input
+   each row came from
 
 ---
 
 ## How URLs are walked
 
-The input is turned into a URL template:
+The input is split on commas first (a single input with no comma is just
+one segment), then each segment is turned into a URL template:
 
 - A plain keyword is turned into a `shopee.co.th/search?keyword=...` URL
 - `page=` is replaced with `0, 1, 2, …` up to the page count you chose
 - `sortBy=` is preserved (or set to `sales` if missing)
 - Any other query parameters (filters, etc.) are kept as-is
-- The category ID (`cat.XXXX.YYYY`) or the keyword text is used to name the Sheet tab / CSV file
+- Each segment's category ID (`cat.XXXX.YYYY`) or keyword text is written to
+  every row it produces as the **Keyword** column, and its rank starts over
+  at 1 — results from different keywords are never deduped against each
+  other, since the same product legitimately ranking under two different
+  keywords is two different facts worth keeping
+- The first segment's label (plus a count of how many more) is used to name
+  the Sheet tab / CSV file
 
 ---
 

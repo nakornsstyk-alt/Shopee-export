@@ -27,7 +27,7 @@ MAX_PAGES    = 9
 SHOPEE_BASE  = "https://shopee.co.th"
 PROMO_PHRASES_FILE = "promo_phrases.txt"
 
-HEADERS = ["Rank", "Name", "Link", "Stars", "Price (฿)", "Qty Sold / Month"]
+HEADERS = ["Rank", "Keyword", "Name", "Link", "Stars", "Price (฿)", "Qty Sold / Month"]
 
 # Fallback phrases used only if promo_phrases.txt is missing/empty.
 DEFAULT_PROMO_PHRASES = [
@@ -64,6 +64,30 @@ def load_promo_phrases() -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 CAT_ID_RE = re.compile(r"-cat\.([\d.]+)", re.IGNORECASE)
+
+
+def parse_multi_input(raw_input: str) -> list:
+    """Split a comma-separated input into individually-parsed dicts.
+
+    Each comma-separated segment can be its own category URL, search URL,
+    or plain keyword (they don't have to all be the same kind). Raises
+    ValueError (naming the offending segment) if any segment is invalid,
+    so bad input is caught before Chrome is even connected to.
+    """
+    segments = [s.strip() for s in (raw_input or "").split(",")]
+    segments = [s for s in segments if s]
+    if not segments:
+        raise ValueError(
+            "Input is empty. Paste a category URL, search URL, or keyword(s) "
+            "separated by commas."
+        )
+    parsed = []
+    for seg in segments:
+        try:
+            parsed.append(parse_input(seg))
+        except ValueError as e:
+            raise ValueError(f"'{seg}': {e}") from e
+    return parsed
 
 
 def parse_input(raw_input: str) -> dict:
@@ -183,20 +207,152 @@ def normalize_qty(raw: str) -> str:
     return raw
 
 
-def scrape_shopee_listing(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
-    """
-    Connect to Chrome via CDP, walk pages 0..max_pages-1 of the given category URL,
-    search URL, or keyword, scrape all cards.  Returns list of dicts.
-    """
-    parsed = parse_input(raw_input)
-    if parsed["mode"] == "category":
-        log_fn(f"🏷  Category ID: {parsed['label']}")
-    else:
-        log_fn(f"🔍 Keyword: {parsed['label']}")
+# ── selectors Shopee has used across layouts ────────────────────────────────
+CARD_SELECTORS = [
+    "li[data-sqe='item']",
+    "div[data-sqe='item']",
+    ".shopee-search-item-result__item",
+    "li.col-xs-2-4",
+    "div[class*='grid'] li",
+    "ul.row > li",
+]
 
+
+def _find_cards(pg):
+    """Try every known card selector against an open page; return (selector, count)."""
+    for sel in CARD_SELECTORS:
+        try:
+            count = pg.eval_on_selector_all(sel, "els => els.length")
+            if count and count > 4:
+                return sel, count
+        except Exception:
+            continue
+    return None, 0
+
+
+def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_json: str) -> list:
+    """Walk pages 0..max_pages-1 for a single already-parsed input (category,
+    search URL, or keyword) using an already-open Playwright page. Returns a
+    de-duped (within this input only — not across other inputs) list of raw
+    item dicts, pre-rank and pre-name-resolution.
+    """
+    results = []
+
+    for page_num in range(max_pages):
+        url = build_page_url(parsed, page_num)
+        log_fn(f"📄 Page {page_num + 1}/{max_pages} → {url}")
+
+        page.goto(url, wait_until="networkidle", timeout=40000)
+        time.sleep(2.5)   # let React hydrate
+
+        # scroll to load all lazy images / cards
+        for _ in range(8):
+            page.mouse.wheel(0, 1000)
+            time.sleep(0.35)
+        time.sleep(1.5)
+
+        card_sel, card_count = _find_cards(page)
+        if not card_sel:
+            snippet = page.evaluate("document.body.innerText.slice(0, 200)")
+            log_fn(f"  ⚠️  No cards found on page {page_num + 1}.")
+            log_fn(f"      Page text: {snippet[:150]}")
+            if page_num == 0:
+                log_fn("  💡 Tip: Make sure you're logged in to shopee.co.th in the debug Chrome window.")
+            break
+
+        log_fn(f"  🔎 Selector '{card_sel}' matched {card_count} cards")
+
+        js_code = (
+            "() => {\n"
+            "  const results = [];\n"
+            "  const items = document.querySelectorAll(" + repr(card_sel) + ");\n"
+            "  items.forEach(item => {\n"
+            "    const anchor = item.querySelector(\"a[href]\");\n"
+            "    const rawHref = anchor ? anchor.getAttribute(\"href\") : \"\";\n"
+            "    const link = rawHref ? (rawHref.startsWith(\"http\") ? rawHref : \"https://shopee.co.th\" + rawHref) : \"\";\n"
+            "    const PROMO_PHRASES = " + promo_phrases_json + ";\n"
+            "    const genericPromoRe = /(ซื้อ\\s*\\d+\\s*ชิ้น|ลด\\s*฿?\\s*\\d|ช้อป[^\\n]{0,15}คุ้ม|ยิ่งซื้อยิ่ง(คุ้ม|ได้)|flash\\s*sale|voucher)/i;\n"
+            "    const isPromoText = t => genericPromoRe.test(t) || PROMO_PHRASES.some(p => t.toLowerCase().includes(p.toLowerCase()));\n"
+            "    const nameSelectors = ['[data-sqe=\"name\"]', '[class*=\"item-name\"]', '[class*=\"itemName\"]', '[class*=\"ellipsis\"]', '[class*=\"name\"]'];\n"
+            "    let name = \"\";\n"
+            "    {\n"
+            "      const seen = new Set();\n"
+            "      let best = \"\";\n"
+            "      for (const sel of nameSelectors) {\n"
+            "        for (const el of item.querySelectorAll(sel)) {\n"
+            "          const t = el.innerText.trim();\n"
+            "          if (!t || seen.has(t)) continue;\n"
+            "          seen.add(t);\n"
+            "          if (!isPromoText(t) && t.length > best.length) best = t;\n"
+            "        }\n"
+            "      }\n"
+            "      name = best;\n"
+            "    }\n"
+            "    if (!name && anchor) { name = anchor.innerText.trim().split(\"\\n\").map(l=>l.trim()).filter(l=>l.length>8 && !isPromoText(l))[0]||\"\" }\n"
+            "    let stars = \"\";\n"
+            "    for (const el of item.querySelectorAll(\"span,div\")) { const t=el.innerText.trim(); if(/^[1-5](\\.[0-9])?$/.test(t)){stars=t;break;} }\n"
+            "    const fullText = item.innerText;\n"
+            "    let price = \"\";\n"
+            "    const pm = fullText.match(/\\u0e3f\\s?([\\d,]+(?:\\.[\\d]+)?)/);\n"
+            "    if(pm){price=pm[1];}else{for(const el of item.querySelectorAll('[class*=\"price\"]')){const t=el.innerText.replace(/[^0-9,]/g,\"\");if(t){price=t;break;}}}\n"
+            "    let qtySold = \"\";\n"
+            "    const sm = fullText.match(/(ขายได้|ขายแล้ว)[^\\d]*(\\d[\\d,.]*[พันล้านหมื่นแสนKk]*\\+?)\\s*ชิ้น/);\n"
+            "    if(sm){qtySold=sm[2].trim();}else{const em=fullText.match(/(\\d[\\d,.]*[KkMm]?)\\s*sold/i);if(em)qtySold=em[1];}\n"
+            "    if(!qtySold){for(const el of item.querySelectorAll('[class*=\"sold\"]')){const t=el.innerText.trim();if(t&&/\\d/.test(t)){qtySold=t;break;}}}\n"
+            "    const isMall=!!(item.querySelector('[class*=\"mall\"]')||item.querySelector('[class*=\"Mall\"]')||[...item.querySelectorAll(\"span,div\")].find(e=>e.innerText.trim()===\"Mall\"));\n"
+            "    let discount=\"\";\n"
+            "    const dm=fullText.match(/-(\\d{1,3})\\s*%/);\n"
+            "    if(dm){discount=\"-\"+dm[1]+\"%\";}else{for(const el of item.querySelectorAll('[class*=\"discount\"],[class*=\"Discount\"]')){const t=el.innerText.trim();if(t&&t.includes(\"%\")){discount=t;break;}}}\n"
+            "    let origPrice=\"\";\n"
+            "    const ap=[...fullText.matchAll(/\\u0e3f\\s*([\\d,]+(?:\\.[\\d]+)?)/g)].map(m=>m[1]);\n"
+            "    if(ap.length>=2){const curr=price.replace(/,/g,\"\");for(const p of ap){if(p.replace(/,/g,\"\")!==curr){origPrice=p;break;}}}\n"
+            "    if(!origPrice){for(const el of item.querySelectorAll('[class*=\"line-through\"],[class*=\"before\"],[class*=\"original\"],[class*=\"del\"]')){const t=el.innerText.replace(/[^0-9,]/g,\"\");if(t){origPrice=t;break;}}}\n"
+            "    let shipping=\"\";\n"
+            "    const skws=[\"ส่งฟรี\",\"ฟรีค่าจัดส่ง\",\"freeship\",\"จัดส่งฟรี\"];\n"
+            "    const lt=fullText.toLowerCase();for(const kw of skws){if(lt.includes(kw.toLowerCase())){shipping=kw;break;}}\n"
+            "    if(!shipping){for(const el of item.querySelectorAll('[class*=\"ship\"],[class*=\"Ship\"],[class*=\"delivery\"],[class*=\"free\"]')){const t=el.innerText.trim();if(t&&t.length<30){shipping=t;break;}}}\n"
+            "    let location=\"\";\n"
+            "    for(const el of item.querySelectorAll('[class*=\"location\"],[class*=\"Location\"],[class*=\"province\"],[class*=\"region\"]')){const t=el.innerText.trim();if(t&&t.length<60){location=t;break;}}\n"
+            "    if(!location){const lm=fullText.match(/จังหวัด([^\\n]+)/);if(lm)location=\"จังหวัด\"+lm[1].trim().slice(0,30);}\n"
+            "    const isSponsored=!!(item.querySelector('[class*=\"ads\"],[class*=\"sponsor\"],[class*=\"Ads\"],[class*=\"promoted\"]')||fullText.includes(\"Sponsored\")||fullText.includes(\"โฆษณา\"));\n"
+            "    if(link)results.push({name,link,stars,price,origPrice,discount,qtySold,isMall,shipping,location,isSponsored});\n"
+            "  });\n"
+            "  return results;\n"
+            "}"
+        )
+        cards = page.evaluate(js_code)
+
+        page_count_before = len(results)
+        seen_links = {r['link'] for r in results}
+        for item in cards:
+            if item['link'] and item['link'] not in seen_links:
+                results.append(item)
+                seen_links.add(item['link'])
+
+        added = len(results) - page_count_before
+        dupes = len(cards) - added
+        log_fn(f"  ✅ Collected {added} new items (skipped {dupes} dupes, total: {len(results)})")
+
+        if added == 0:
+            log_fn("  ⚠️  No new items, stopping early.")
+            break
+
+    return results
+
+
+def scrape_shopee_multi(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
+    """
+    Accepts one or more comma-separated inputs — each a category URL, search
+    URL, or plain keyword. Connects to Chrome once and runs every input
+    sequentially over that same connection. Every output row is tagged with
+    the input ("keyword" column) that produced it, and rank restarts at 1 for
+    each input, so results from different keywords don't get mixed together
+    or deduped against each other.
+    """
+    parsed_list = parse_multi_input(raw_input)
     promo_phrases_json = json.dumps(load_promo_phrases(), ensure_ascii=False)
 
-    results = []
+    all_ranked = []
 
     with sync_playwright() as p:
         log_fn("🔌 Connecting to Chrome...")
@@ -212,143 +368,31 @@ def scrape_shopee_listing(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page    = context.new_page()
 
-        # ── selectors Shopee has used across layouts ──────────────────────────
-        CARD_SELECTORS = [
-            "li[data-sqe='item']",
-            "div[data-sqe='item']",
-            ".shopee-search-item-result__item",
-            "li.col-xs-2-4",
-            "div[class*='grid'] li",
-            "ul.row > li",
-        ]
+        total = len(parsed_list)
+        for idx, parsed in enumerate(parsed_list, 1):
+            label = parsed["label"]
+            tag = "🏷  Category ID" if parsed["mode"] == "category" else "🔍 Keyword"
+            log_fn(f"{tag} [{idx}/{total}]: {label}")
 
-        def find_cards(pg):
-            """Try every known selector; return (selector, element_count)."""
-            for sel in CARD_SELECTORS:
-                try:
-                    count = pg.eval_on_selector_all(sel, "els => els.length")
-                    if count and count > 4:
-                        return sel, count
-                except Exception:
-                    continue
-            return None, 0
+            raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
 
-        for page_num in range(max_pages):
-            url = build_page_url(parsed, page_num)
-            log_fn(f"📄 Page {page_num + 1}/{max_pages} → {url}")
-
-            page.goto(url, wait_until="networkidle", timeout=40000)
-            time.sleep(2.5)   # let React hydrate
-
-            # scroll to load all lazy images / cards
-            for _ in range(8):
-                page.mouse.wheel(0, 1000)
-                time.sleep(0.35)
-            time.sleep(1.5)
-
-            card_sel, card_count = find_cards(page)
-            if not card_sel:
-                snippet = page.evaluate("document.body.innerText.slice(0, 200)")
-                log_fn(f"  ⚠️  No cards found on page {page_num + 1}.")
-                log_fn(f"      Page text: {snippet[:150]}")
-                if page_num == 0:
-                    log_fn("  💡 Tip: Make sure you're logged in to shopee.co.th in the debug Chrome window.")
-                break
-
-            log_fn(f"  🔎 Selector '{card_sel}' matched {card_count} cards")
-
-            js_code = (
-                "() => {\n"
-                "  const results = [];\n"
-                "  const items = document.querySelectorAll(" + repr(card_sel) + ");\n"
-                "  items.forEach(item => {\n"
-                "    const anchor = item.querySelector(\"a[href]\");\n"
-                "    const rawHref = anchor ? anchor.getAttribute(\"href\") : \"\";\n"
-                "    const link = rawHref ? (rawHref.startsWith(\"http\") ? rawHref : \"https://shopee.co.th\" + rawHref) : \"\";\n"
-                "    const PROMO_PHRASES = " + promo_phrases_json + ";\n"
-                "    const genericPromoRe = /(ซื้อ\\s*\\d+\\s*ชิ้น|ลด\\s*฿?\\s*\\d|ช้อป[^\\n]{0,15}คุ้ม|ยิ่งซื้อยิ่ง(คุ้ม|ได้)|flash\\s*sale|voucher)/i;\n"
-                "    const isPromoText = t => genericPromoRe.test(t) || PROMO_PHRASES.some(p => t.toLowerCase().includes(p.toLowerCase()));\n"
-                "    const nameSelectors = ['[data-sqe=\"name\"]', '[class*=\"item-name\"]', '[class*=\"itemName\"]', '[class*=\"ellipsis\"]', '[class*=\"name\"]'];\n"
-                "    let name = \"\";\n"
-                "    {\n"
-                "      const seen = new Set();\n"
-                "      let best = \"\";\n"
-                "      for (const sel of nameSelectors) {\n"
-                "        for (const el of item.querySelectorAll(sel)) {\n"
-                "          const t = el.innerText.trim();\n"
-                "          if (!t || seen.has(t)) continue;\n"
-                "          seen.add(t);\n"
-                "          if (!isPromoText(t) && t.length > best.length) best = t;\n"
-                "        }\n"
-                "      }\n"
-                "      name = best;\n"
-                "    }\n"
-                "    if (!name && anchor) { name = anchor.innerText.trim().split(\"\\n\").map(l=>l.trim()).filter(l=>l.length>8 && !isPromoText(l))[0]||\"\" }\n"
-                "    let stars = \"\";\n"
-                "    for (const el of item.querySelectorAll(\"span,div\")) { const t=el.innerText.trim(); if(/^[1-5](\\.[0-9])?$/.test(t)){stars=t;break;} }\n"
-                "    const fullText = item.innerText;\n"
-                "    let price = \"\";\n"
-                "    const pm = fullText.match(/\\u0e3f\\s?([\\d,]+(?:\\.[\\d]+)?)/);\n"
-                "    if(pm){price=pm[1];}else{for(const el of item.querySelectorAll('[class*=\"price\"]')){const t=el.innerText.replace(/[^0-9,]/g,\"\");if(t){price=t;break;}}}\n"
-                "    let qtySold = \"\";\n"
-                "    const sm = fullText.match(/(ขายได้|ขายแล้ว)[^\\d]*(\\d[\\d,.]*[พันล้านหมื่นแสนKk]*\\+?)\\s*ชิ้น/);\n"
-                "    if(sm){qtySold=sm[2].trim();}else{const em=fullText.match(/(\\d[\\d,.]*[KkMm]?)\\s*sold/i);if(em)qtySold=em[1];}\n"
-                "    if(!qtySold){for(const el of item.querySelectorAll('[class*=\"sold\"]')){const t=el.innerText.trim();if(t&&/\\d/.test(t)){qtySold=t;break;}}}\n"
-                "    const isMall=!!(item.querySelector('[class*=\"mall\"]')||item.querySelector('[class*=\"Mall\"]')||[...item.querySelectorAll(\"span,div\")].find(e=>e.innerText.trim()===\"Mall\"));\n"
-                "    let discount=\"\";\n"
-                "    const dm=fullText.match(/-(\\d{1,3})\\s*%/);\n"
-                "    if(dm){discount=\"-\"+dm[1]+\"%\";}else{for(const el of item.querySelectorAll('[class*=\"discount\"],[class*=\"Discount\"]')){const t=el.innerText.trim();if(t&&t.includes(\"%\")){discount=t;break;}}}\n"
-                "    let origPrice=\"\";\n"
-                "    const ap=[...fullText.matchAll(/\\u0e3f\\s*([\\d,]+(?:\\.[\\d]+)?)/g)].map(m=>m[1]);\n"
-                "    if(ap.length>=2){const curr=price.replace(/,/g,\"\");for(const p of ap){if(p.replace(/,/g,\"\")!==curr){origPrice=p;break;}}}\n"
-                "    if(!origPrice){for(const el of item.querySelectorAll('[class*=\"line-through\"],[class*=\"before\"],[class*=\"original\"],[class*=\"del\"]')){const t=el.innerText.replace(/[^0-9,]/g,\"\");if(t){origPrice=t;break;}}}\n"
-                "    let shipping=\"\";\n"
-                "    const skws=[\"ส่งฟรี\",\"ฟรีค่าจัดส่ง\",\"freeship\",\"จัดส่งฟรี\"];\n"
-                "    const lt=fullText.toLowerCase();for(const kw of skws){if(lt.includes(kw.toLowerCase())){shipping=kw;break;}}\n"
-                "    if(!shipping){for(const el of item.querySelectorAll('[class*=\"ship\"],[class*=\"Ship\"],[class*=\"delivery\"],[class*=\"free\"]')){const t=el.innerText.trim();if(t&&t.length<30){shipping=t;break;}}}\n"
-                "    let location=\"\";\n"
-                "    for(const el of item.querySelectorAll('[class*=\"location\"],[class*=\"Location\"],[class*=\"province\"],[class*=\"region\"]')){const t=el.innerText.trim();if(t&&t.length<60){location=t;break;}}\n"
-                "    if(!location){const lm=fullText.match(/จังหวัด([^\\n]+)/);if(lm)location=\"จังหวัด\"+lm[1].trim().slice(0,30);}\n"
-                "    const isSponsored=!!(item.querySelector('[class*=\"ads\"],[class*=\"sponsor\"],[class*=\"Ads\"],[class*=\"promoted\"]')||fullText.includes(\"Sponsored\")||fullText.includes(\"โฆษณา\"));\n"
-                "    if(link)results.push({name,link,stars,price,origPrice,discount,qtySold,isMall,shipping,location,isSponsored});\n"
-                "  });\n"
-                "  return results;\n"
-                "}"
-            )
-            cards = page.evaluate(js_code)
-
-            page_count_before = len(results)
-            seen_links = {r['link'] for r in results}
-            for item in cards:
-                if item['link'] and item['link'] not in seen_links:
-                    results.append(item)
-                    seen_links.add(item['link'])
-
-            added = len(results) - page_count_before
-            dupes = len(cards) - added
-            log_fn(f"  ✅ Collected {added} new items (skipped {dupes} dupes, total: {len(results)})")
-
-            if added == 0:
-                log_fn("  ⚠️  No new items, stopping early.")
-                break
+            for i, r in enumerate(raw_results, 1):
+                link = r.get("link", "")
+                name = name_from_link(link) or r.get("name", "")
+                all_ranked.append({
+                    "rank":       i,
+                    "keyword":    label,
+                    "name":       name,
+                    "link":       link,
+                    "stars":      r.get("stars", ""),
+                    "price":      r.get("price", ""),
+                    "qty_sold":   normalize_qty(r.get("qtySold", "")),
+                })
 
         page.close()
         browser.close()
 
-    # add rank
-    ranked = []
-    for i, r in enumerate(results, 1):
-        link = r.get("link", "")
-        name = name_from_link(link) or r.get("name", "")
-        ranked.append({
-            "rank":       i,
-            "name":       name,
-            "link":       link,
-            "stars":      r.get("stars", ""),
-            "price":      r.get("price", ""),
-            "qty_sold":   normalize_qty(r.get("qtySold", "")),
-        })
-    return ranked
+    return all_ranked
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -377,7 +421,7 @@ def push_to_sheets(data: list, sheet_id: str, label: str, creds_file: str, log_f
     rows = [HEADERS]
     for r in data:
         rows.append([
-            r["rank"], r["name"], r["link"],
+            r["rank"], r["keyword"], r["name"], r["link"],
             r["stars"], r["price"], r["qty_sold"],
         ])
 
@@ -393,7 +437,7 @@ def push_to_sheets(data: list, sheet_id: str, label: str, creds_file: str, log_f
 def export_csv(data: list, filepath: str):
     import csv
     with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["rank","name","link","stars","price","qty_sold"])
+        writer = csv.DictWriter(f, fieldnames=["rank","keyword","name","link","stars","price","qty_sold"])
         writer.writeheader()
         writer.writerows(data)
 
@@ -468,7 +512,7 @@ class ShopeeCategoryScraperApp(tk.Tk):
 
         self._section_label(card, "🔗  Category URL / Keyword")
 
-        tk.Label(card, text="Paste category URL, search URL, or keyword", bg=self.PANEL, fg=self.MUTED,
+        tk.Label(card, text="Paste category URL, search URL, or keyword(s)", bg=self.PANEL, fg=self.MUTED,
                  font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 2))
 
         self.url_var = tk.StringVar()
@@ -485,7 +529,9 @@ class ShopeeCategoryScraperApp(tk.Tk):
             text=(
                 "e.g. https://shopee.co.th/...-cat.11044959.11045208?sortBy=sales\n"
                 "or https://shopee.co.th/search?keyword=นมผง\n"
-                "or just: นมผง"
+                "or just: นมผง\n"
+                "Multiple keywords, comma-separated: นมผง, ยาสีฟัน, ผงซักฟอก\n"
+                "(each keyword gets its own rank 1..N, tagged in the Keyword column)"
             ),
             bg=self.PANEL, fg=self.MUTED,
             font=("Segoe UI", 8), wraplength=290, justify="left",
@@ -655,9 +701,9 @@ class ShopeeCategoryScraperApp(tk.Tk):
         table_frame = tk.Frame(parent, bg=self.BG)
         table_frame.pack(fill="both", expand=True)
 
-        cols = ("rank", "name", "stars", "price", "qty_sold")
-        col_widths = {"rank": 45, "name": 420, "stars": 55, "price": 90, "qty_sold": 130}
-        col_labels = {"rank": "#", "name": "Product Name", "stars": "⭐", "price": "Price ฿", "qty_sold": "Sold / Month"}
+        cols = ("rank", "keyword", "name", "stars", "price", "qty_sold")
+        col_widths = {"rank": 45, "keyword": 110, "name": 330, "stars": 55, "price": 90, "qty_sold": 130}
+        col_labels = {"rank": "#", "keyword": "Keyword", "name": "Product Name", "stars": "⭐", "price": "Price ฿", "qty_sold": "Sold / Month"}
 
         style.configure("Shopee.Treeview",
             background=self.PANEL,
@@ -815,9 +861,13 @@ class ShopeeCategoryScraperApp(tk.Tk):
         item = self.tree.focus()
         if not item:
             return
-        row_data = self.tree.item(item)["values"]
-        rank = int(row_data[0])
-        link = self._results[rank - 1]["link"]
+        # Use the row's position in the tree, not the displayed rank number —
+        # rank restarts at 1 for every keyword, so it's not a unique index
+        # into self._results once more than one keyword has been scraped.
+        idx = self.tree.index(item)
+        if not (0 <= idx < len(self._results)):
+            return
+        link = self._results[idx]["link"]
         if link:
             import webbrowser
             webbrowser.open(link)
@@ -829,15 +879,20 @@ class ShopeeCategoryScraperApp(tk.Tk):
             return
         raw_input = self.url_var.get().strip()
         if not raw_input:
-            messagebox.showwarning("No input", "Please paste a category URL, search URL, or keyword.")
+            messagebox.showwarning("No input", "Please paste a category URL, search URL, or keyword(s).")
             return
         try:
-            parsed = parse_input(raw_input)
-            self._label = parsed["label"]
-            self._mode  = parsed["mode"]
+            parsed_list = parse_multi_input(raw_input)
         except ValueError as e:
             messagebox.showerror("Invalid Input", str(e))
             return
+
+        if len(parsed_list) == 1:
+            self._label = parsed_list[0]["label"]
+            self._mode  = parsed_list[0]["mode"]
+        else:
+            self._label = f"{parsed_list[0]['label']}_+{len(parsed_list) - 1}more"
+            self._mode  = "keyword"
 
         self._scraping = True
         self.scrape_btn.configure(state="disabled", text="⏳  Scraping...")
@@ -863,9 +918,8 @@ class ShopeeCategoryScraperApp(tk.Tk):
                     pct = int(m.group(1)) / int(m.group(2)) * 100
                     self.after(0, self.progress_var.set, pct)
 
-            status_word = "category" if self._mode == "category" else "keyword"
-            self.after(0, self._set_status, f"Scraping {status_word} '{self._label}'…", self.WARNING)
-            data = scrape_shopee_listing(raw_input, log_fn, max_pages=pages)
+            self.after(0, self._set_status, f"Scraping '{self._label}'…", self.WARNING)
+            data = scrape_shopee_multi(raw_input, log_fn, max_pages=pages)
             self._results = data
             self.after(0, self._populate_table, data)
             self.after(0, self._set_status, f"Done — {len(data)} products", self.SUCCESS)
@@ -891,7 +945,7 @@ class ShopeeCategoryScraperApp(tk.Tk):
         for i, r in enumerate(data):
             tag = "odd" if i % 2 == 0 else "even"
             self.tree.insert("", "end", values=(
-                r["rank"], r["name"], r["stars"], r["price"],
+                r["rank"], r["keyword"], r["name"], r["stars"], r["price"],
                 r["qty_sold"],
             ), tags=(tag,))
 
