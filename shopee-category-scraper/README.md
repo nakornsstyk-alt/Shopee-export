@@ -89,18 +89,27 @@ shopee-category-scraper/
   detection issues
 - Extracts stars, price, and sold count using partial class matching
   (`[class*="..."]`) since Shopee uses generated class names
-- Product name candidates come from several selectors, then Shopee's
-  in-card marketing badges (e.g. "ซื้อ 2 ชิ้น ลด ฿1", "ช้อปเพิ่มคุ้มกว่า",
-  "ส่งฟรี") are filtered out: numeric "buy N get discount" badges are
+- **Product name is recovered from the item's own URL first**: Shopee
+  builds links as `.../<slugified-title>-i.<shopid>.<itemid>`, generating
+  that slug straight from the real title, so it can never contain a
+  promo badge. Special characters (`%`, `/`, `&`, ...) get stripped by
+  Shopee's own slugifier, so the recovered name may be missing some
+  punctuation the on-page title has, but the words are always correct.
+- If a link doesn't match that URL shape (rare — e.g. some ad-redirect
+  links), the app falls back to scraping the name out of the card's DOM
+  text, filtering out known marketing badges (e.g. "ซื้อ 2 ชิ้น ลด ฿1",
+  "ช้อปเพิ่มคุ้มกว่า", "ส่งฟรี"): numeric "buy N get discount" badges are
   caught automatically by pattern regardless of wording, and everything
   else is matched against `promo_phrases.txt` — the longest surviving
   candidate wins
 
 ### If a promo badge still shows up as the item name
 
-Open `promo_phrases.txt`, add the exact badge text on its own line, save,
-and re-scrape — no code changes needed. See the comments at the top of
-that file for the format.
+This should be rare now that the URL slug is the primary source, but if
+it happens (i.e. the link didn't match the expected item-URL shape, so
+the DOM fallback was used): open `promo_phrases.txt`, add the exact badge
+text on its own line, save, and re-scrape — no code changes needed. See
+the comments at the top of that file for the format.
 
 ---
 

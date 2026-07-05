@@ -122,6 +122,34 @@ def build_page_url(parsed: dict, page: int) -> str:
 #  SCRAPER
 # ══════════════════════════════════════════════════════════════════════════════
 
+ITEM_SLUG_RE = re.compile(r"^(.*)-i\.\d+\.\d+$")
+
+
+def name_from_link(link: str) -> str:
+    """Recover the product title from a Shopee item URL's SEO slug.
+
+    Shopee builds item URLs as .../<slugified-title>-i.<shopid>.<itemid>,
+    generating the slug straight from the real title — so it can never
+    contain in-card promo-badge text the way scraped DOM text can. Special
+    characters (%, /, &, ...) are stripped by Shopee's own slugifier and
+    can't be recovered, so the result may be missing punctuation the
+    on-page title has, but the words themselves are always the real name.
+
+    Returns "" if the link doesn't match the expected item-URL shape (e.g.
+    a non-standard or ad-redirect link), so callers can fall back to the
+    DOM-scraped name.
+    """
+    if not link:
+        return ""
+    path = urllib.parse.urlparse(link).path.lstrip("/")
+    decoded = urllib.parse.unquote(path, encoding="utf-8", errors="ignore")
+    m = ITEM_SLUG_RE.match(decoded)
+    if not m:
+        return ""
+    name = m.group(1).replace("-", " ")
+    return re.sub(r"\s+", " ", name).strip()
+
+
 def slugify_label(label: str) -> str:
     """Turn a category id or keyword (incl. Thai text) into a safe tab/file name."""
     safe = re.sub(r"[^\w.-]+", "_", (label or "").strip(), flags=re.UNICODE)
@@ -310,10 +338,12 @@ def scrape_shopee_listing(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
     # add rank
     ranked = []
     for i, r in enumerate(results, 1):
+        link = r.get("link", "")
+        name = name_from_link(link) or r.get("name", "")
         ranked.append({
             "rank":       i,
-            "name":       r.get("name", ""),
-            "link":       r.get("link", ""),
+            "name":       name,
+            "link":       link,
             "stars":      r.get("stars", ""),
             "price":      r.get("price", ""),
             "qty_sold":   normalize_qty(r.get("qtySold", "")),
