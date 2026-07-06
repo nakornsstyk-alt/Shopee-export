@@ -10,6 +10,16 @@ the **Keyword** column that produced it, and rank restarting at 1 for every
 keyword (so "rank 3" always means 3rd place for that keyword's own search,
 not 3rd overall).
 
+For keyword inputs, both `shopee.co.th/search` (normal search) and
+`shopee.co.th/mall/search` (Shopee Mall only) are scraped and merged — the
+two return noticeably different, each individually incomplete-looking,
+result sets for the same keyword. Duplicates (the same product appearing in
+both) are removed by matching each product's real shop/item ID, not its raw
+link, since tracking parameters differ between the two surfaces. Rank is
+then computed from the merged set as **quantity sold (highest first), with
+price (lowest first) as the tiebreaker** — not page order, since page order
+from two different sources merged together isn't a meaningful ranking.
+
 **Collects:** Rank · Keyword · Product Name · Link · Stars · Price (฿) · Qty Sold / Month
 
 ---
@@ -62,10 +72,12 @@ one segment), then each segment is turned into a URL template:
 - `sortBy=` is preserved (or set to `sales` if missing)
 - Any other query parameters (filters, etc.) are kept as-is
 - Each segment's category ID (`cat.XXXX.YYYY`) or keyword text is written to
-  every row it produces as the **Keyword** column, and its rank starts over
-  at 1 — results from different keywords are never deduped against each
-  other, since the same product legitimately ranking under two different
-  keywords is two different facts worth keeping
+  every row it produces as the **Keyword** column
+- For a keyword segment, both the normal-search and Mall-search URLs are
+  built and scraped, then merged and deduped by item ID before ranking (see
+  above) — results from different *keyword segments*, however, are never
+  deduped against each other, since the same product legitimately ranking
+  under two different keywords is two different facts worth keeping
 - The first segment's label (plus a count of how many more) is used to name
   the Sheet tab / CSV file
 
@@ -101,7 +113,8 @@ shopee-category-scraper/
 - Connects to **your real Chrome** via CDP (port 9222) — Chrome handles all
   Shopee authentication tokens automatically
 - Iterates `page=0..8` (9 pages) on the category/search URL you paste (or the
-  search URL built from your keyword)
+  search URL built from your keyword); for keywords, this runs once against
+  normal search and once against Mall search
 - Scrolls each page to trigger lazy loading
 - Reads rendered HTML via `page.evaluate()` JS — no API calls, no bot
   detection issues

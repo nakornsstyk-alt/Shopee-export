@@ -147,6 +147,24 @@ def build_page_url(parsed: dict, page: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 ITEM_SLUG_RE = re.compile(r"^(.*)-i\.\d+\.\d+$")
+ITEM_ID_RE = re.compile(r"-i\.(\d+)\.(\d+)")
+
+
+def item_key(link: str) -> str:
+    """Canonical identity for a product: its shopid.itemid, parsed from the
+    link. Two URLs for the same item can differ in tracking query params
+    (extraParams, sp_atk, ...) or in which listing surface they came from
+    (normal search vs. Shopee Mall search), so comparing raw link strings
+    under-deduplicates. Falls back to the raw link if the URL doesn't match
+    the expected item-URL shape.
+    """
+    if not link:
+        return ""
+    path = urllib.parse.urlparse(link).path
+    m = ITEM_ID_RE.search(path)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}"
+    return link
 
 
 def name_from_link(link: str) -> str:
@@ -180,31 +198,61 @@ def slugify_label(label: str) -> str:
     return safe.strip("_") or "export"
 
 
-def normalize_qty(raw: str) -> str:
-    """Convert Thai sold-count shorthand to plain numbers.
-    e.g. '5พัน+' → '5,000+',  '1.2หมื่น+' → '12,000+',  '3แสน' → '300,000'
+QTY_MULTIPLIERS = {
+    'พัน':   1_000,
+    'หมื่น': 10_000,
+    'แสน':   100_000,
+    'ล้าน':  1_000_000,
+    'K':     1_000,
+    'k':     1_000,
+    'M':     1_000_000,
+    'm':     1_000_000,
+}
+
+
+def parse_qty_sold(raw: str):
+    """Parse a raw sold-count string (Thai shorthand or plain number) into
+    (number, has_plus_suffix). Returns (0.0, False) if unparseable/empty.
     """
     if not raw:
-        return raw
+        return 0.0, False
     raw = raw.strip()
-    multipliers = {
-        'พัน':   1_000,
-        'หมื่น': 10_000,
-        'แสน':   100_000,
-        'ล้าน':  1_000_000,
-        'K':     1_000,
-        'k':     1_000,
-        'M':     1_000_000,
-        'm':     1_000_000,
-    }
-    for word, mult in multipliers.items():
-        pattern = r'([0-9]+(?:\.[0-9]+)?)\s*' + re.escape(word) + r'(\+?)'
-        m = re.search(pattern, raw)
+    for word, mult in QTY_MULTIPLIERS.items():
+        m = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*' + re.escape(word) + r'(\+?)', raw)
         if m:
-            num   = float(m.group(1)) * mult
-            plus  = m.group(2)
-            return f"{int(num):,}"
-    return raw
+            return float(m.group(1)) * mult, bool(m.group(2))
+    m = re.search(r'([\d,]+(?:\.[\d]+)?)(\+?)', raw)
+    if m:
+        try:
+            return float(m.group(1).replace(',', '')), bool(m.group(2))
+        except ValueError:
+            return 0.0, False
+    return 0.0, False
+
+
+def qty_sold_value(raw: str) -> float:
+    """Numeric sold-count, for sorting — see parse_qty_sold()."""
+    return parse_qty_sold(raw)[0]
+
+
+def price_value(raw: str) -> float:
+    """Numeric price, for sorting. Unknown/unparseable prices sort last."""
+    if not raw:
+        return float("inf")
+    try:
+        return float(str(raw).replace(",", ""))
+    except ValueError:
+        return float("inf")
+
+
+def normalize_qty(raw: str) -> str:
+    """Convert Thai sold-count shorthand to plain, comma-grouped numbers.
+    e.g. '5พัน+' → '5,000+',  '1.2หมื่น+' → '12,000+',  '3แสน' → '300,000'
+    """
+    if not raw or not re.search(r'\d', raw):
+        return raw
+    num, has_plus = parse_qty_sold(raw)
+    return f"{int(num):,}{'+' if has_plus else ''}"
 
 
 # ── selectors Shopee has used across layouts ────────────────────────────────
@@ -340,14 +388,67 @@ def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_
     return results
 
 
+def _dedupe_by_item(raw_results: list) -> list:
+    """Drop duplicate products (same shopid.itemid) from a combined result
+    set, keeping the first occurrence — see item_key()."""
+    seen = set()
+    out = []
+    for r in raw_results:
+        key = item_key(r.get("link", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def _rank_group(raw_results: list, label: str) -> list:
+    """Dedupe a group of raw results (all belonging to the same keyword or
+    category), rank them by quantity sold (highest first, price ascending
+    as the tiebreaker), and shape them into output rows starting at rank 1.
+    """
+    deduped = _dedupe_by_item(raw_results)
+    deduped.sort(key=lambda r: (
+        -qty_sold_value(r.get("qtySold", "")),
+        price_value(r.get("price", "")),
+    ))
+
+    ranked = []
+    for i, r in enumerate(deduped, 1):
+        link = r.get("link", "")
+        name = name_from_link(link) or r.get("name", "")
+        ranked.append({
+            "rank":       i,
+            "keyword":    label,
+            "name":       name,
+            "link":       link,
+            "stars":      r.get("stars", ""),
+            "price":      r.get("price", ""),
+            "qty_sold":   normalize_qty(r.get("qtySold", "")),
+        })
+    return ranked
+
+
 def scrape_shopee_multi(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
     """
     Accepts one or more comma-separated inputs — each a category URL, search
     URL, or plain keyword. Connects to Chrome once and runs every input
-    sequentially over that same connection. Every output row is tagged with
-    the input ("keyword" column) that produced it, and rank restarts at 1 for
-    each input, so results from different keywords don't get mixed together
-    or deduped against each other.
+    sequentially over that same connection.
+
+    For keyword inputs, both shopee.co.th/search and shopee.co.th/mall/search
+    are scraped and merged — the two surfaces return noticeably different
+    (and each individually incomplete-looking) result sets for the same
+    keyword, so combining them gives better coverage. Duplicates (the same
+    product appearing in both) are dropped by canonical item id, not by
+    matching the raw link, since tracking query params differ between the
+    two surfaces.
+
+    Every output row is tagged with the input ("keyword" column) that
+    produced it. Rank is (re)computed within each input's own result set —
+    not taken from page order — as quantity sold descending, with price
+    ascending as the tiebreaker, and restarts at 1 for every input, so
+    results from different keywords don't get mixed together or deduped
+    against each other.
     """
     parsed_list = parse_multi_input(raw_input)
     promo_phrases_json = json.dumps(load_promo_phrases(), ensure_ascii=False)
@@ -371,23 +472,23 @@ def scrape_shopee_multi(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
         total = len(parsed_list)
         for idx, parsed in enumerate(parsed_list, 1):
             label = parsed["label"]
-            tag = "🏷  Category ID" if parsed["mode"] == "category" else "🔍 Keyword"
-            log_fn(f"{tag} [{idx}/{total}]: {label}")
 
-            raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
+            if parsed["mode"] == "keyword":
+                log_fn(f"🔍 Keyword [{idx}/{total}]: {label}")
+                log_fn("  🔎 Searching shopee.co.th/search…")
+                normal_input = {"mode": "keyword", "base": f"{SHOPEE_BASE}/search",
+                                 "query": parsed["query"], "label": label}
+                raw_results = _scrape_one_input(page, normal_input, log_fn, max_pages, promo_phrases_json)
 
-            for i, r in enumerate(raw_results, 1):
-                link = r.get("link", "")
-                name = name_from_link(link) or r.get("name", "")
-                all_ranked.append({
-                    "rank":       i,
-                    "keyword":    label,
-                    "name":       name,
-                    "link":       link,
-                    "stars":      r.get("stars", ""),
-                    "price":      r.get("price", ""),
-                    "qty_sold":   normalize_qty(r.get("qtySold", "")),
-                })
+                log_fn("  🏬 Searching shopee.co.th/mall/search…")
+                mall_input = {"mode": "keyword", "base": f"{SHOPEE_BASE}/mall/search",
+                              "query": parsed["query"], "label": label}
+                raw_results += _scrape_one_input(page, mall_input, log_fn, max_pages, promo_phrases_json)
+            else:
+                log_fn(f"🏷  Category ID [{idx}/{total}]: {label}")
+                raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
+
+            all_ranked.extend(_rank_group(raw_results, label))
 
         page.close()
         browser.close()
