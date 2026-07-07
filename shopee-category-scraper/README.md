@@ -102,6 +102,7 @@ shopee-category-scraper/
   setup.bat               ← one-time installer
   launch.bat              ← run the app
   start_chrome_debug.bat  ← start Chrome with CDP
+  HANDOVER.md              ← technical deep-dive / how to recreate this app
   credentials.json        ← your Google service account key (add manually)
   venv/                   ← auto-created by setup.bat
 ```
