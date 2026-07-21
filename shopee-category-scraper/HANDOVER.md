@@ -143,6 +143,19 @@ file). Shop inputs are scraped once, like category inputs — no Mall-variant
 merge, since a shop's storefront doesn't have a separate Mall/normal split
 (that distinction only exists for the site-wide search results, §7.5).
 
+**Shop-mode per-month filter:** a shop's own page shows the sorted product
+grid — where sold counts are *per month* ("ขายได้ X ชิ้น/เดือน") — plus one
+or more recommendation/highlight carousels above it, whose cards show
+*lifetime* totals ("ขายแล้ว X ชิ้น") and are usually different products. The
+link-based scraper picks up both, so shop mode keeps only cards whose sold
+text carries the per-month marker (`/เดือน`, or `/month` in English). The
+extraction records this as a `soldPerMonth` boolean per card; the shop
+branch filters on it. If a shop happens to have *no* per-month-marked cards
+at all, the filter is skipped (keep everything) rather than returning empty.
+This filter is shop-mode only — category/search pages legitimately show
+lifetime "ขายแล้ว" counts, so filtering them per-month would wrongly drop
+everything.
+
 `build_page_url(parsed, page_num)` clones `query`, sets `page=<page_num>`,
 and URL-encodes it onto `base`.
 

@@ -50,7 +50,10 @@ Double-click: launch.bat
    - A category URL — `https://shopee.co.th/เครื่องสำอางสำหรับผิวหน้า-cat.11044959.11045208?page=0&sortBy=sales`
    - A search URL — `https://shopee.co.th/search?keyword=นมผง`
    - A shop's own storefront URL — `https://shopee.co.th/s26_gold3` — to
-     rank just that one shop's own products by sales
+     rank just that one shop's own products by sales. Only the shop's actual
+     product grid (sold **per month**, "ขายได้ X ชิ้น/เดือน") is kept; the
+     recommendation/highlight carousels above it (lifetime "ขายแล้ว X ชิ้น")
+     are dropped
    - A plain keyword — `นมผง`
    - **Multiple inputs, comma-separated** — `นมผง, ยาสีฟัน, https://shopee.co.th/s26_gold3`
      (each runs as its own scrape, one after another, over the same Chrome

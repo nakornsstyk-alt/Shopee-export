@@ -426,10 +426,10 @@ def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_
             "    let price = \"\";\n"
             "    const pm = fullText.match(/\\u0e3f\\s?([\\d,]+(?:\\.[\\d]+)?)/);\n"
             "    if(pm){price=pm[1];}else{for(const el of item.querySelectorAll('[class*=\"price\"]')){const t=el.innerText.replace(/[^0-9,]/g,\"\");if(t){price=t;break;}}}\n"
-            "    let qtySold = \"\";\n"
-            "    const sm = fullText.match(/(ขายได้|ขายแล้ว)[^\\d]*(\\d[\\d,.]*[พันล้านหมื่นแสนKk]*\\+?)\\s*ชิ้น/);\n"
-            "    if(sm){qtySold=sm[2].trim();}else{const em=fullText.match(/(\\d[\\d,.]*[KkMm]?)\\s*sold/i);if(em)qtySold=em[1];}\n"
-            "    if(!qtySold){for(const el of item.querySelectorAll('[class*=\"sold\"]')){const t=el.innerText.trim();if(t&&/\\d/.test(t)){qtySold=t;break;}}}\n"
+            "    let qtySold = \"\"; let soldPerMonth = false;\n"
+            "    const sm = fullText.match(/(ขายได้|ขายแล้ว)[^\\d]*(\\d[\\d,.]*[พันล้านหมื่นแสนKk]*\\+?)\\s*ชิ้น(\\s*\\/\\s*เดือน)?/);\n"
+            "    if(sm){qtySold=sm[2].trim(); soldPerMonth=!!sm[3];}else{const em=fullText.match(/(\\d[\\d,.]*[KkMm]?)\\s*sold(\\s*\\/\\s*(month|mo))?/i);if(em){qtySold=em[1]; soldPerMonth=!!em[2];}}\n"
+            "    if(!qtySold){for(const el of item.querySelectorAll('[class*=\"sold\"]')){const t=el.innerText.trim();if(t&&/\\d/.test(t)){qtySold=t; if(/เดือน|\\/\\s*mo/i.test(t))soldPerMonth=true; break;}}}\n"
             "    const isMall=!!(item.querySelector('[class*=\"mall\"]')||item.querySelector('[class*=\"Mall\"]')||[...item.querySelectorAll(\"span,div\")].find(e=>e.innerText.trim()===\"Mall\"));\n"
             "    let discount=\"\";\n"
             "    const dm=fullText.match(/-(\\d{1,3})\\s*%/);\n"
@@ -446,7 +446,7 @@ def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_
             "    for(const el of item.querySelectorAll('[class*=\"location\"],[class*=\"Location\"],[class*=\"province\"],[class*=\"region\"]')){const t=el.innerText.trim();if(t&&t.length<60){location=t;break;}}\n"
             "    if(!location){const lm=fullText.match(/จังหวัด([^\\n]+)/);if(lm)location=\"จังหวัด\"+lm[1].trim().slice(0,30);}\n"
             "    const isSponsored=!!(item.querySelector('[class*=\"ads\"],[class*=\"sponsor\"],[class*=\"Ads\"],[class*=\"promoted\"]')||fullText.includes(\"Sponsored\")||fullText.includes(\"โฆษณา\"));\n"
-            "    if(link)results.push({name,link,stars,price,origPrice,discount,qtySold,isMall,shipping,location,isSponsored});\n"
+            "    if(link)results.push({name,link,stars,price,origPrice,discount,qtySold,soldPerMonth,isMall,shipping,location,isSponsored});\n"
             "  });\n"
             "  return results;\n"
             "}"
@@ -570,6 +570,23 @@ def scrape_shopee_multi(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
             elif parsed["mode"] == "shop":
                 log_fn(f"🏪 Shop [{idx}/{total}]: {label}")
                 raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
+                # A shop page shows the sorted product grid (sold PER MONTH,
+                # "ขายได้ X ชิ้น/เดือน") plus recommendation/highlight carousels
+                # above it (lifetime total, "ขายแล้ว X ชิ้น"). Keep only the
+                # per-month grid items — those are the shop's actual ranked
+                # listing the user is after.
+                before = len(raw_results)
+                per_month = [r for r in raw_results if r.get("soldPerMonth")]
+                dropped = before - len(per_month)
+                if per_month:
+                    raw_results = per_month
+                    if dropped:
+                        log_fn(f"  🧹 Kept {len(per_month)} 'ขายได้ .../เดือน' items, "
+                               f"dropped {dropped} non-monthly (carousel/recommended)")
+                else:
+                    # Nothing had a /เดือน marker — don't silently return empty;
+                    # fall back to everything so the shop still yields results.
+                    log_fn("  ℹ️  No 'ขายได้ .../เดือน' markers found — keeping all items.")
             else:
                 log_fn(f"🏷  Category ID [{idx}/{total}]: {label}")
                 raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
