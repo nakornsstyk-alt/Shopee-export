@@ -163,8 +163,27 @@ CARD_SELECTORS = [
 ```
 
 For each page: `page.goto(url, wait_until="networkidle")`, sleep ~2.5s for
-React to hydrate, scroll down 8×(1000px + 0.35s) to trigger lazy-loaded
-cards/images, then find cards and run one big `page.evaluate()` JS function
+React to hydrate, then `_scroll_to_load_cards()`:
+
+```python
+# 1. Check for cards immediately.
+# 2. If none: scroll 1200px, wait 0.4s, check again — repeat up to 30 times,
+#    bailing out early if document.body.scrollHeight stops growing (genuinely
+#    reached the bottom with nothing found).
+# 3. Once cards are found: scroll another 8×(1000px + 0.35s) to trigger the
+#    rest of that page's lazy-loaded cards/images, then re-count.
+```
+
+Step 2 exists because a shop's own page (§7.1 shop mode) renders a banner
+carousel, shop info card, and a tab bar *above* its product grid — a small
+fixed scroll count (the original approach) can stop before ever reaching
+real cards, making the shop look empty and — since finding 0 cards ends the
+page loop immediately — looking like pagination "only works for 1 page"
+when the real cause was never finding page 1's cards at all. Category/search
+pages have cards near the top, so step 2 typically exits after 0 iterations
+for them — this doesn't slow those down.
+
+Once cards are confirmed present, run one big `page.evaluate()` JS function
 per page that extracts, for every card: link, name, stars, price, original
 price, discount %, qty sold, mall flag, shipping tag, location, sponsored
 flag. (Only name/link/stars/price/qty_sold currently reach the CSV output;
@@ -331,6 +350,7 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
 | Sold-count parsing (Thai shorthand) | `parse_qty_sold()`, `qty_sold_value()`, `normalize_qty()` |
 | Price parsing for ranking | `price_value()` |
 | One page-walk over one input | `_scrape_one_input()` |
+| Scroll until product cards appear | `_scroll_to_load_cards()` |
 | Dedup a result set | `_dedupe_by_item()` |
 | Dedup + rank a result set | `_rank_group()` |
 | Top-level orchestration (multi-input, dual-source) | `scrape_shopee_multi()` |
@@ -359,12 +379,14 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
   price, their relative order is whatever Python's stable sort happened to
   produce (effectively scrape order) — not a meaningful distinction in
   practice.
-- **Shop-page card layout is assumed, not live-verified.** Shop-mode reuses
-  the same `CARD_SELECTORS` and field-extraction JS as category/search
-  pages, since Shopee's shop storefront grid has historically used the same
-  card markup — but this hasn't been confirmed against a live shop page. If
-  a shop scrape returns 0 items while the same shop's products clearly
-  exist, check DevTools on that live shop page first (see Troubleshooting).
+- **Shop pages have significant content above the product grid** (banner
+  carousel, shop info card, tab bar) — confirmed via real usage, not just
+  theorized. `_scroll_to_load_cards()` (§7.2) handles this by scrolling
+  until cards actually appear rather than a fixed count, but the underlying
+  `CARD_SELECTORS` list is still the same one tuned against category/search
+  pages. If a shop scrape still returns 0 items despite the shop clearly
+  having products, check DevTools on that live shop page for a different
+  card container class/attribute (see Troubleshooting).
 - Extracted-but-unused fields exist in the scraper (original price, discount
   %, mall flag, shipping tag, location, sponsored flag) — captured in the
   JS `results.push({...})` object but not currently carried through to the

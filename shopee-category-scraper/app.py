@@ -296,6 +296,40 @@ def _find_cards(pg):
     return None, 0
 
 
+def _scroll_to_load_cards(pg, probe_attempts: int = 30, settle_scrolls: int = 8):
+    """Scroll down until product cards actually appear, then scroll a bit
+    further to trigger the rest of that page's lazy-loaded cards/images.
+
+    A fixed small scroll count works for category/search pages, where cards
+    are near the top, but a shop's own page renders banners, highlight
+    carousels, and a tab bar above its product grid — a fixed count can stop
+    scrolling before ever reaching real cards, making the page look empty.
+    This keeps scrolling until cards show up or the page stops growing
+    (genuinely reached the bottom / nothing left to lazy-load).
+    """
+    card_sel, card_count = _find_cards(pg)
+    last_height = None
+    attempts = 0
+    while not card_sel and attempts < probe_attempts:
+        pg.mouse.wheel(0, 1200)
+        time.sleep(0.4)
+        height = pg.evaluate("document.body.scrollHeight")
+        if height == last_height:
+            break  # page stopped growing — nothing more to scroll into view
+        last_height = height
+        card_sel, card_count = _find_cards(pg)
+        attempts += 1
+
+    if card_sel:
+        for _ in range(settle_scrolls):
+            pg.mouse.wheel(0, 1000)
+            time.sleep(0.35)
+        time.sleep(1.5)
+        card_sel, card_count = _find_cards(pg)  # re-count after loading the rest
+
+    return card_sel, card_count
+
+
 def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_json: str) -> list:
     """Walk pages 0..max_pages-1 for a single already-parsed input (category,
     search URL, or keyword) using an already-open Playwright page. Returns a
@@ -311,13 +345,7 @@ def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_
         page.goto(url, wait_until="networkidle", timeout=40000)
         time.sleep(2.5)   # let React hydrate
 
-        # scroll to load all lazy images / cards
-        for _ in range(8):
-            page.mouse.wheel(0, 1000)
-            time.sleep(0.35)
-        time.sleep(1.5)
-
-        card_sel, card_count = _find_cards(page)
+        card_sel, card_count = _scroll_to_load_cards(page)
         if not card_sel:
             snippet = page.evaluate("document.body.innerText.slice(0, 200)")
             log_fn(f"  ⚠️  No cards found on page {page_num + 1}.")

@@ -124,7 +124,10 @@ shopee-category-scraper/
 - Iterates `page=0..8` (9 pages) on the category/search URL you paste (or the
   search URL built from your keyword); for keywords, this runs once against
   normal search and once against Mall search
-- Scrolls each page to trigger lazy loading
+- Scrolls each page to trigger lazy loading — keeps scrolling until actual
+  product cards appear (not a fixed scroll count), since a shop's own page
+  renders banners/highlight carousels above its product grid that a small
+  fixed scroll wouldn't get past
 - Reads rendered HTML via `page.evaluate()` JS — no API calls, no bot
   detection issues
 - Extracts stars, price, and sold count using partial class matching
