@@ -146,48 +146,51 @@ merge, since a shop's storefront doesn't have a separate Mall/normal split
 `build_page_url(parsed, page_num)` clones `query`, sets `page=<page_num>`,
 and URL-encodes it onto `base`.
 
-### 7.2 Card discovery
+### 7.2 Card discovery — by item link, not by container class
 
-Shopee has used several different DOM structures over time. Try each
-selector in order, take the first one matching more than 4 elements:
+Shopee's product-card container class names differ between page types
+(category vs. search vs. a shop's own microsite) and drift over time. An
+earlier version tried a list of known container selectors
+(`li[data-sqe='item']`, `.shopee-search-item-result__item`, ...) and broke
+on shop pages, which use none of them. So detection/extraction is now
+anchored on the **one invariant**: every product card, on every page type,
+contains a link to the product. Product URLs come in two shapes:
+
+- SEO slug (search/category): `.../<slug>-i.<shopid>.<itemid>`
+- canonical (sometimes in shop microsites): `/product/<shopid>/<itemid>`
+
+`__itemId(href)` (JS) and `ITEM_ID_RE` (Python) both match either shape and
+return `"<shopid>.<itemid>"`. Card discovery counts distinct such ids.
+
+For each page: `page.goto(url, wait_until="domcontentloaded")` (not
+`networkidle` — Shopee's SPA keeps connections open and would time out),
+sleep ~2.5s for React to hydrate, then `_scroll_to_load_cards()`:
 
 ```python
-CARD_SELECTORS = [
-    "li[data-sqe='item']",
-    "div[data-sqe='item']",
-    ".shopee-search-item-result__item",
-    "li.col-xs-2-4",
-    "div[class*='grid'] li",
-    "ul.row > li",
-]
+# Scroll (window.scrollBy 2000px) in a loop, up to 40 times.
+# After each scroll, recount distinct item-links and read scrollHeight.
+# Stop after 3 consecutive rounds where BOTH stop changing (fully loaded /
+# reached the bottom). Return the final item count.
 ```
 
-For each page: `page.goto(url, wait_until="networkidle")`, sleep ~2.5s for
-React to hydrate, then `_scroll_to_load_cards()`:
+This handles a shop page's banner carousel / shop-info card / tab bar above
+the grid (it keeps scrolling until items actually appear, rather than a
+fixed count that could stop short), and also fully lazy-loads long grids.
+Category/search pages have items near the top, so it settles quickly there.
 
-```python
-# 1. Check for cards immediately.
-# 2. If none: scroll 1200px, wait 0.4s, check again — repeat up to 30 times,
-#    bailing out early if document.body.scrollHeight stops growing (genuinely
-#    reached the bottom with nothing found).
-# 3. Once cards are found: scroll another 8×(1000px + 0.35s) to trigger the
-#    rest of that page's lazy-loaded cards/images, then re-count.
-```
+If the count is 0, a diagnostic logs the total `<a>` count and page height —
+so "products exist but no item-links matched" (a structural/URL-format
+problem) is distinguishable from "page genuinely empty" (login/render
+problem) from the log alone.
 
-Step 2 exists because a shop's own page (§7.1 shop mode) renders a banner
-carousel, shop info card, and a tab bar *above* its product grid — a small
-fixed scroll count (the original approach) can stop before ever reaching
-real cards, making the shop look empty and — since finding 0 cards ends the
-page loop immediately — looking like pagination "only works for 1 page"
-when the real cause was never finding page 1's cards at all. Category/search
-pages have cards near the top, so step 2 typically exits after 0 iterations
-for them — this doesn't slow those down.
-
-Once cards are confirmed present, run one big `page.evaluate()` JS function
-per page that extracts, for every card: link, name, stars, price, original
-price, discount %, qty sold, mall flag, shipping tag, location, sponsored
-flag. (Only name/link/stars/price/qty_sold currently reach the CSV output;
-the rest are extracted but unused today — easy to wire up later.)
+The extraction JS then, in one `page.evaluate()`: collects one representative
+anchor per distinct item id, and for each derives the **card container** as
+the largest ancestor of that anchor still containing no *other* item id
+(i.e. the biggest single-item subtree — a class-name-independent card
+boundary). It extracts, scoped to that container: link, name, stars, price,
+original price, discount %, qty sold, mall flag, shipping tag, location,
+sponsored flag. (Only name/link/stars/price/qty_sold currently reach the CSV
+output; the rest are extracted but unused today — easy to wire up later.)
 
 ### 7.3 Product name extraction — the important part
 
@@ -245,16 +248,20 @@ link doesn't match the item-URL shape, e.g. ad-redirect links):
 ### 7.4 Canonical item identity & deduplication
 
 Two URLs for the same product can differ in tracking query params
-(`extraParams`, `sp_atk`, ...) or in which surface they came from (normal
-search vs. Mall search). Comparing raw link strings under-deduplicates, so
-identity is the `shopid.itemid` pair parsed from the URL:
+(`extraParams`, `sp_atk`, ...), in which surface they came from (normal
+search vs. Mall search), or in which of the two URL shapes they use (SEO
+slug vs. `/product/<shopid>/<itemid>`). Comparing raw link strings
+under-deduplicates, so identity is the `shopid.itemid` pair parsed from
+either URL shape:
 
 ```python
-ITEM_ID_RE = re.compile(r"-i\.(\d+)\.(\d+)")
+ITEM_ID_RE = re.compile(r"-i\.(\d+)\.(\d+)|/product/(\d+)/(\d+)")
 
 def item_key(link: str) -> str:
     m = ITEM_ID_RE.search(urllib.parse.urlparse(link).path)
-    return f"{m.group(1)}.{m.group(2)}" if m else link   # fall back to raw link
+    if not m:
+        return link                                        # fall back to raw link
+    return f"{m.group(1)}.{m.group(2)}" if m.group(1) else f"{m.group(3)}.{m.group(4)}"
 ```
 
 Within a single page-walk, an additional cheap raw-link dedup avoids
@@ -350,6 +357,7 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
 | Sold-count parsing (Thai shorthand) | `parse_qty_sold()`, `qty_sold_value()`, `normalize_qty()` |
 | Price parsing for ranking | `price_value()` |
 | One page-walk over one input | `_scrape_one_input()` |
+| Count distinct item-links in DOM | `_count_items()` |
 | Scroll until product cards appear | `_scroll_to_load_cards()` |
 | Dedup a result set | `_dedupe_by_item()` |
 | Dedup + rank a result set | `_rank_group()` |
@@ -366,10 +374,12 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
   shopee.co.th yourself in the CDP-launched Chrome window each session (the
   separate `--user-data-dir` profile does persist the session between runs,
   though, so this is usually only needed once).
-- **Selector drift risk.** Shopee's class names are partly generated/hashed
-  and change periodically. `CARD_SELECTORS` and the in-card field regexes
-  may need updating if scraping suddenly returns 0 results — see
-  Troubleshooting.
+- **Selector drift risk.** Card *detection* no longer depends on container
+  class names (it uses item-links, §7.2), so that part is resilient. But the
+  in-card *field* extraction (price, stars, sold, etc.) still uses partial
+  class matching (`[class*="price"]`, ...) and text regexes that could need
+  updating if Shopee changes them — a scrape that finds the right item count
+  but returns blank prices/sold would point here.
 - **`promo_phrases.txt` is reactive, not exhaustive.** New marketing badge
   wording will need to be added as it's spotted; the generic numeric regex
   (§7.3 step 2) covers "buy N get discount" style badges automatically
@@ -379,14 +389,13 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
   price, their relative order is whatever Python's stable sort happened to
   produce (effectively scrape order) — not a meaningful distinction in
   practice.
-- **Shop pages have significant content above the product grid** (banner
-  carousel, shop info card, tab bar) — confirmed via real usage, not just
-  theorized. `_scroll_to_load_cards()` (§7.2) handles this by scrolling
-  until cards actually appear rather than a fixed count, but the underlying
-  `CARD_SELECTORS` list is still the same one tuned against category/search
-  pages. If a shop scrape still returns 0 items despite the shop clearly
-  having products, check DevTools on that live shop page for a different
-  card container class/attribute (see Troubleshooting).
+- **Shop pages** render a banner carousel, shop-info card, and tab bar above
+  the product grid, and use different card markup than search/category —
+  both handled by the item-link-based detection + scroll-until-loaded
+  approach (§7.2). If a shop scrape still returns 0, the 0-items diagnostic
+  (total link count + page height, logged automatically) tells you whether
+  it's a structural/URL-format issue (many links, none matched) or a
+  render/login issue (few links) — see Troubleshooting.
 - Extracted-but-unused fields exist in the scraper (original price, discount
   %, mall flag, shipping tag, location, sponsored flag) — captured in the
   JS `results.push({...})` object but not currently carried through to the
@@ -397,10 +406,11 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | "Cannot connect to Chrome" | CDP Chrome not running | Run `start_chrome_debug.bat` first |
-| 0 products found on page 1 | Not logged in to Shopee in the debug Chrome window | Log in, then re-scrape |
-| "URL is not a category page... / not a search page..." | Pasted a non-matching URL | Use a `-cat.<id>` URL, a `?keyword=...` URL, or a plain keyword |
-| A promo badge shows up as the product name | Rare — only happens when the link didn't match the item-URL shape, so the DOM fallback (§7.3) was used, and the badge wasn't in `promo_phrases.txt` | Add the exact badge text as a new line in `promo_phrases.txt`, re-scrape |
-| Scraper suddenly returns 0 cards across the board | Shopee changed its DOM structure | Re-inspect a live page (DevTools) for the new card container class/attribute, add it to `CARD_SELECTORS` |
+| 0 products found, diagnostic shows **few** links on the page | Not logged in, or the page didn't render | Log in to Shopee in the debug Chrome window; try scrolling the page manually once, then re-scrape |
+| 0 products found, diagnostic shows **many** links on the page | Products render but their links don't match either item-URL shape (`-i.<ids>` / `/product/<ids>`) — Shopee introduced a new URL format | Inspect a product link on that live page (DevTools); extend `ITEM_ID_RE` (Python) and `_ITEM_RE_JS` (JS) to match the new shape |
+| "URL is not a category page... / not a search page... / recognizable shop URL" | Pasted a non-matching URL | Use a `-cat.<id>` URL, a `?keyword=...` URL, a shop URL, or a plain keyword |
+| A promo badge shows up as the product name | Rare — only when the link didn't match the item-URL shape so the DOM name fallback (§7.3) was used, and the badge wasn't in `promo_phrases.txt` | Add the exact badge text as a new line in `promo_phrases.txt`, re-scrape |
+| Right item count found but prices/sold are blank | Shopee changed the in-card field markup (§7.2 caveat) | Re-inspect a live card in DevTools; update the field selectors/regexes in the extraction JS |
 | CSV opens with garbled Thai text in Excel | Excel misdetecting encoding | Shouldn't happen — export already uses `utf-8-sig` (BOM); if it does, re-open via Excel's "From Text/CSV" import with UTF-8 explicitly selected |
 | Google Sheets push fails | Missing/expired `credentials.json`, or the sheet isn't shared with the service account | Re-download the JSON key; share the target sheet with the service account's email as Editor |
 
@@ -417,10 +427,12 @@ If this file is ever lost, the app can be rebuilt from the descriptions in
    keyword, split multi-input on commas.
 3. **Playwright CDP connection** (§7.7) — `connect_over_cdp("http://localhost:9222")`,
    reuse the first existing browser context so the user's login carries over.
-4. **Page walk + card scraping** (§7.2) — try each selector in
-   `CARD_SELECTORS` until one returns a healthy count, run a single
-   `page.evaluate()` per page extracting all fields at once (cheaper than
-   many round-trips).
+4. **Page walk + card scraping** (§7.2) — detect products by their item
+   links (`-i.<ids>` or `/product/<ids>`), not container class names; scroll
+   until the item count stops growing; then run a single `page.evaluate()`
+   per page that finds each item's card container (largest single-item
+   ancestor of its link) and extracts all fields at once (cheaper than many
+   round-trips).
 5. **Name resolution** (§7.3) — URL-slug method first, DOM-scrape-with-
    promo-filter as fallback. This is the single most fragile/important part
    — get the item-URL regex right first, since it removes most of the need

@@ -165,7 +165,10 @@ def build_page_url(parsed: dict, page: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 ITEM_SLUG_RE = re.compile(r"^(.*)-i\.\d+\.\d+$")
-ITEM_ID_RE = re.compile(r"-i\.(\d+)\.(\d+)")
+# Two item-URL shapes: SEO slug (.../<slug>-i.<shopid>.<itemid>) on
+# search/category pages, and canonical (/product/<shopid>/<itemid>) sometimes
+# used in shop microsites. Match either.
+ITEM_ID_RE = re.compile(r"-i\.(\d+)\.(\d+)|/product/(\d+)/(\d+)")
 
 
 def item_key(link: str) -> str:
@@ -174,14 +177,14 @@ def item_key(link: str) -> str:
     (extraParams, sp_atk, ...) or in which listing surface they came from
     (normal search vs. Shopee Mall search), so comparing raw link strings
     under-deduplicates. Falls back to the raw link if the URL doesn't match
-    the expected item-URL shape.
+    either expected item-URL shape.
     """
     if not link:
         return ""
     path = urllib.parse.urlparse(link).path
     m = ITEM_ID_RE.search(path)
     if m:
-        return f"{m.group(1)}.{m.group(2)}"
+        return f"{m.group(1)}.{m.group(2)}" if m.group(1) else f"{m.group(3)}.{m.group(4)}"
     return link
 
 
@@ -273,61 +276,66 @@ def normalize_qty(raw: str) -> str:
     return f"{int(num):,}{'+' if has_plus else ''}"
 
 
-# ── selectors Shopee has used across layouts ────────────────────────────────
-CARD_SELECTORS = [
-    "li[data-sqe='item']",
-    "div[data-sqe='item']",
-    ".shopee-search-item-result__item",
-    "li.col-xs-2-4",
-    "div[class*='grid'] li",
-    "ul.row > li",
-]
+# Distinct product-item links are the one invariant across every Shopee page
+# type (category, search, shop) — every product card, wherever it lives,
+# links to .../<slug>-i.<shopid>.<itemid>. Class names for the card container
+# differ between page types and drift over time, so we detect and extract off
+# these links rather than off fragile container selectors.
+# Item URLs come in two shapes: the SEO slug form used on search/category
+# pages (.../<slug>-i.<shopid>.<itemid>) and the canonical form sometimes
+# used in shop microsites (/product/<shopid>/<itemid>). Match either.
+_ITEM_RE_JS = r"/(?:-i\.(\d+)\.(\d+))|(?:\/product\/(\d+)\/(\d+))/"
+_ITEM_ID_FN_JS = (
+    "function __itemId(href){var m=(href||'').match(" + _ITEM_RE_JS + ");"
+    "if(!m)return '';return m[1]?(m[1]+'.'+m[2]):(m[3]+'.'+m[4]);}"
+)
+
+_COUNT_ITEMS_JS = "() => {\n" + _ITEM_ID_FN_JS + "\n" + r"""
+  const ids = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    const id = __itemId(a.getAttribute('href') || '');
+    if (id) ids.add(id);
+  }
+  return ids.size;
+}"""
 
 
-def _find_cards(pg):
-    """Try every known card selector against an open page; return (selector, count)."""
-    for sel in CARD_SELECTORS:
-        try:
-            count = pg.eval_on_selector_all(sel, "els => els.length")
-            if count and count > 4:
-                return sel, count
-        except Exception:
-            continue
-    return None, 0
+def _count_items(pg) -> int:
+    """Count distinct product-item links currently rendered in the DOM."""
+    try:
+        return pg.evaluate(_COUNT_ITEMS_JS)
+    except Exception:
+        return 0
 
 
-def _scroll_to_load_cards(pg, probe_attempts: int = 30, settle_scrolls: int = 8):
-    """Scroll down until product cards actually appear, then scroll a bit
-    further to trigger the rest of that page's lazy-loaded cards/images.
+def _scroll_to_load_cards(pg, max_scrolls: int = 40) -> int:
+    """Scroll down until product-item links appear and stop increasing (all
+    lazy content loaded), or the page stops growing.
 
-    A fixed small scroll count works for category/search pages, where cards
-    are near the top, but a shop's own page renders banners, highlight
-    carousels, and a tab bar above its product grid — a fixed count can stop
-    scrolling before ever reaching real cards, making the page look empty.
-    This keeps scrolling until cards show up or the page stops growing
-    (genuinely reached the bottom / nothing left to lazy-load).
+    Works for pages where cards are near the top (category/search) AND for a
+    shop's own page, which renders banners, a highlight carousel, and a tab
+    bar above its product grid — the loop simply keeps scrolling while either
+    the item count or the page height is still changing, so it never gives up
+    before reaching the grid, and it also fully lazy-loads long grids.
+    Returns the final distinct item count.
     """
-    card_sel, card_count = _find_cards(pg)
-    last_height = None
-    attempts = 0
-    while not card_sel and attempts < probe_attempts:
-        pg.mouse.wheel(0, 1200)
+    count = _count_items(pg)
+    height = pg.evaluate("document.body.scrollHeight")
+    idle = 0
+    for _ in range(max_scrolls):
+        pg.evaluate("window.scrollBy(0, 2000)")
         time.sleep(0.4)
-        height = pg.evaluate("document.body.scrollHeight")
-        if height == last_height:
-            break  # page stopped growing — nothing more to scroll into view
-        last_height = height
-        card_sel, card_count = _find_cards(pg)
-        attempts += 1
-
-    if card_sel:
-        for _ in range(settle_scrolls):
-            pg.mouse.wheel(0, 1000)
-            time.sleep(0.35)
-        time.sleep(1.5)
-        card_sel, card_count = _find_cards(pg)  # re-count after loading the rest
-
-    return card_sel, card_count
+        new_count = _count_items(pg)
+        new_height = pg.evaluate("document.body.scrollHeight")
+        if new_count == count and new_height == height:
+            idle += 1
+            if idle >= 3:
+                break  # nothing changing for 3 rounds → fully loaded / bottom
+        else:
+            idle = 0
+        count, height = new_count, new_height
+    time.sleep(1.0)
+    return _count_items(pg)
 
 
 def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_json: str) -> list:
@@ -342,32 +350,61 @@ def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_
         url = build_page_url(parsed, page_num)
         log_fn(f"📄 Page {page_num + 1}/{max_pages} → {url}")
 
-        page.goto(url, wait_until="networkidle", timeout=40000)
+        # Shopee is a heavy SPA that keeps connections open, so "networkidle"
+        # can time out even when the page is usable. Wait only for the DOM,
+        # then let the scroll-poll loop below gate on real content readiness.
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=40000)
+        except Exception as e:
+            log_fn(f"  ⚠️  Navigation issue: {e}")
         time.sleep(2.5)   # let React hydrate
 
-        card_sel, card_count = _scroll_to_load_cards(page)
-        if not card_sel:
+        item_count = _scroll_to_load_cards(page)
+        if not item_count:
+            total_links = page.evaluate("document.querySelectorAll('a[href]').length")
+            height = page.evaluate("document.body.scrollHeight")
             snippet = page.evaluate("document.body.innerText.slice(0, 200)")
-            log_fn(f"  ⚠️  No cards found on page {page_num + 1}.")
+            log_fn(f"  ⚠️  No product cards found on page {page_num + 1}. "
+                   f"(links on page: {total_links}, page height: {height}px)")
             log_fn(f"      Page text: {snippet[:150]}")
             if page_num == 0:
-                log_fn("  💡 Tip: Make sure you're logged in to shopee.co.th in the debug Chrome window.")
+                if total_links and total_links > 5:
+                    log_fn("  💡 The page has links but none matched a product-URL pattern — "
+                           "this shop's grid may use a layout the scraper can't read yet. "
+                           "Send the developer the links/height numbers above.")
+                else:
+                    log_fn("  💡 The page looks empty (few links). If you can see products in "
+                           "the browser, try scrolling it manually once, then re-run.")
             break
 
-        log_fn(f"  🔎 Selector '{card_sel}' matched {card_count} cards")
+        log_fn(f"  🔎 Found {item_count} product cards")
 
         js_code = (
             "() => {\n"
+            "  " + _ITEM_ID_FN_JS + "\n"
             "  const results = [];\n"
-            "  const items = document.querySelectorAll(" + repr(card_sel) + ");\n"
-            "  items.forEach(item => {\n"
-            "    const anchor = item.querySelector(\"a[href]\");\n"
-            "    const rawHref = anchor ? anchor.getAttribute(\"href\") : \"\";\n"
-            "    const link = rawHref ? (rawHref.startsWith(\"http\") ? rawHref : \"https://shopee.co.th\" + rawHref) : \"\";\n"
-            "    const PROMO_PHRASES = " + promo_phrases_json + ";\n"
-            "    const genericPromoRe = /(ซื้อ\\s*\\d+\\s*ชิ้น|ลด\\s*฿?\\s*\\d|ช้อป[^\\n]{0,15}คุ้ม|ยิ่งซื้อยิ่ง(คุ้ม|ได้)|flash\\s*sale|voucher)/i;\n"
-            "    const isPromoText = t => genericPromoRe.test(t) || PROMO_PHRASES.some(p => t.toLowerCase().includes(p.toLowerCase()));\n"
-            "    const nameSelectors = ['[data-sqe=\"name\"]', '[class*=\"item-name\"]', '[class*=\"itemName\"]', '[class*=\"ellipsis\"]', '[class*=\"name\"]'];\n"
+            "  const PROMO_PHRASES = " + promo_phrases_json + ";\n"
+            "  const genericPromoRe = /(ซื้อ\\s*\\d+\\s*ชิ้น|ลด\\s*฿?\\s*\\d|ช้อป[^\\n]{0,15}คุ้ม|ยิ่งซื้อยิ่ง(คุ้ม|ได้)|flash\\s*sale|voucher)/i;\n"
+            "  const isPromoText = t => genericPromoRe.test(t) || PROMO_PHRASES.some(p => t.toLowerCase().includes(p.toLowerCase()));\n"
+            "  const nameSelectors = ['[data-sqe=\"name\"]', '[class*=\"item-name\"]', '[class*=\"itemName\"]', '[class*=\"ellipsis\"]', '[class*=\"name\"]'];\n"
+            "  // one representative anchor per distinct item id\n"
+            "  const byId = new Map();\n"
+            "  for (const a of document.querySelectorAll('a[href]')) {\n"
+            "    const id = __itemId(a.getAttribute('href') || '');\n"
+            "    if (id && !byId.has(id)) byId.set(id, a);\n"
+            "  }\n"
+            "  byId.forEach(anchor => {\n"
+            "    const rawHref = anchor.getAttribute('href') || '';\n"
+            "    const link = rawHref.startsWith('http') ? rawHref : 'https://shopee.co.th' + rawHref;\n"
+            "    // card = largest ancestor of this anchor that still contains no OTHER item id\n"
+            "    let item = anchor;\n"
+            "    let probe = anchor.parentElement;\n"
+            "    for (let up = 0; up < 12 && probe; up++) {\n"
+            "      const ids = new Set();\n"
+            "      for (const a2 of probe.querySelectorAll('a[href]')) { const i2 = __itemId(a2.getAttribute('href')||''); if (i2) ids.add(i2); }\n"
+            "      if (ids.size > 1) break;\n"
+            "      item = probe; probe = probe.parentElement;\n"
+            "    }\n"
             "    let name = \"\";\n"
             "    {\n"
             "      const seen = new Set();\n"
@@ -382,7 +419,7 @@ def _scrape_one_input(page, parsed: dict, log_fn, max_pages: int, promo_phrases_
             "      }\n"
             "      name = best;\n"
             "    }\n"
-            "    if (!name && anchor) { name = anchor.innerText.trim().split(\"\\n\").map(l=>l.trim()).filter(l=>l.length>8 && !isPromoText(l))[0]||\"\" }\n"
+            "    if (!name) { name = anchor.innerText.trim().split(\"\\n\").map(l=>l.trim()).filter(l=>l.length>8 && !isPromoText(l))[0]||\"\" }\n"
             "    let stars = \"\";\n"
             "    for (const el of item.querySelectorAll(\"span,div\")) { const t=el.innerText.trim(); if(/^[1-5](\\.[0-9])?$/.test(t)){stars=t;break;} }\n"
             "    const fullText = item.innerText;\n"
