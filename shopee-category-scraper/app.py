@@ -65,6 +65,16 @@ def load_promo_phrases() -> list:
 
 CAT_ID_RE = re.compile(r"-cat\.([\d.]+)", re.IGNORECASE)
 
+# Single-segment paths that are Shopee site sections, not shop usernames —
+# guards shop-URL detection below from misfiring on things like a bare
+# "https://shopee.co.th/search" (no ?keyword=) or "/cart".
+RESERVED_SHOP_PATHS = {
+    "search", "mall", "cart", "notifications", "help", "seller", "chat",
+    "checkout", "user", "account", "payment", "voucher", "flash-sale",
+    "daily-discover", "official-shop", "onboarding", "buyer", "shopeepay",
+    "product-guarantee", "verify",
+}
+
 
 def parse_multi_input(raw_input: str) -> list:
     """Split a comma-separated input into individually-parsed dicts.
@@ -91,15 +101,17 @@ def parse_multi_input(raw_input: str) -> list:
 
 
 def parse_input(raw_input: str) -> dict:
-    """Accept a Shopee category URL, a Shopee search URL, or a plain keyword.
+    """Accept a Shopee category URL, a Shopee search URL, a shop URL, or a
+    plain keyword.
 
-    Returns dict with: mode ('category' or 'keyword'), base (scheme+netloc+path),
-    query (dict with sortBy applied as default), and label (category id or keyword,
-    used for the Sheets tab name / CSV filename).
+    Returns dict with: mode ('category', 'keyword', or 'shop'), base
+    (scheme+netloc+path), query (dict with sortBy applied as default), and
+    label (category id, keyword, or shop username — used for the Sheets tab
+    name / CSV filename).
     """
     raw = (raw_input or "").strip()
     if not raw:
-        raise ValueError("Input is empty. Paste a category URL, search URL, or keyword.")
+        raise ValueError("Input is empty. Paste a category URL, search URL, shop URL, or keyword.")
 
     parsed = urllib.parse.urlparse(raw)
     is_url = bool(parsed.scheme) and bool(parsed.netloc)
@@ -108,22 +120,28 @@ def parse_input(raw_input: str) -> dict:
         if "shopee" not in parsed.netloc.lower():
             raise ValueError("Not a Shopee URL. Expected a shopee.co.th link.")
         query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
         m = CAT_ID_RE.search(parsed.path)
         if m:
-            base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
             query.setdefault("sortBy", "sales")
             return {"mode": "category", "base": base, "query": query, "label": m.group(1)}
 
         keyword = query.get("keyword", "").strip()
         if keyword:
-            base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
             query.setdefault("sortBy", "sales")
             return {"mode": "keyword", "base": base, "query": query, "label": keyword}
 
+        # A shop's own storefront, e.g. shopee.co.th/s26_gold3?sortBy=sales&tab=0 —
+        # a single path segment that isn't a category/search/reserved site section.
+        segment = parsed.path.strip("/")
+        if segment and "/" not in segment and segment.lower() not in RESERVED_SHOP_PATHS:
+            query.setdefault("sortBy", "sales")
+            return {"mode": "shop", "base": base, "query": query, "label": segment}
+
         raise ValueError(
-            "URL is not a category page (missing '-cat.<id>') and not a "
-            "search page (missing '?keyword=...')."
+            "URL is not a category page (missing '-cat.<id>'), a search page "
+            "(missing '?keyword=...'), or a recognizable shop URL."
         )
 
     # Not a URL at all → treat the whole input as a search keyword.
@@ -484,6 +502,9 @@ def scrape_shopee_multi(raw_input: str, log_fn, max_pages: int = MAX_PAGES):
                 mall_input = {"mode": "keyword", "base": f"{SHOPEE_BASE}/mall/search",
                               "query": parsed["query"], "label": label}
                 raw_results += _scrape_one_input(page, mall_input, log_fn, max_pages, promo_phrases_json)
+            elif parsed["mode"] == "shop":
+                log_fn(f"🏪 Shop [{idx}/{total}]: {label}")
+                raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
             else:
                 log_fn(f"🏷  Category ID [{idx}/{total}]: {label}")
                 raw_results = _scrape_one_input(page, parsed, log_fn, max_pages, promo_phrases_json)
@@ -587,7 +608,7 @@ class ShopeeCategoryScraperApp(tk.Tk):
         ).pack(side="left", padx=20, pady=12)
 
         tk.Label(
-            header, text="หมวดหมู่ / คีย์เวิร์ด (category or keyword) · 9 หน้า",
+            header, text="หมวดหมู่ / คีย์เวิร์ด / ร้านค้า (category, keyword, or shop) · 9 หน้า",
             bg=self.SHOPEE_ORANGE, fg="#FFE0D8",
             font=("Segoe UI", 10),
         ).pack(side="left", padx=6)
@@ -611,9 +632,9 @@ class ShopeeCategoryScraperApp(tk.Tk):
         card = tk.Frame(parent, bg=self.PANEL, bd=0)
         card.pack(fill="x", pady=(0, 12))
 
-        self._section_label(card, "🔗  Category URL / Keyword")
+        self._section_label(card, "🔗  Category / Keyword / Shop URL")
 
-        tk.Label(card, text="Paste category URL, search URL, or keyword(s)", bg=self.PANEL, fg=self.MUTED,
+        tk.Label(card, text="Paste category URL, search URL, shop URL, or keyword(s)", bg=self.PANEL, fg=self.MUTED,
                  font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=(6, 2))
 
         self.url_var = tk.StringVar()
@@ -630,9 +651,10 @@ class ShopeeCategoryScraperApp(tk.Tk):
             text=(
                 "e.g. https://shopee.co.th/...-cat.11044959.11045208?sortBy=sales\n"
                 "or https://shopee.co.th/search?keyword=นมผง\n"
+                "or a shop's own page: https://shopee.co.th/s26_gold3\n"
                 "or just: นมผง\n"
-                "Multiple keywords, comma-separated: นมผง, ยาสีฟัน, ผงซักฟอก\n"
-                "(each keyword gets its own rank 1..N, tagged in the Keyword column)"
+                "Multiple inputs, comma-separated: นมผง, ยาสีฟัน, https://shopee.co.th/s26_gold3\n"
+                "(each input gets its own rank 1..N, tagged in the Keyword column)"
             ),
             bg=self.PANEL, fg=self.MUTED,
             font=("Segoe UI", 8), wraplength=290, justify="left",
@@ -1083,7 +1105,7 @@ class ShopeeCategoryScraperApp(tk.Tk):
             messagebox.showinfo("No data", "Scrape first.")
             return
         label = slugify_label(self._label or "export")
-        prefix = "cat" if self._mode == "category" else "kw"
+        prefix = {"category": "cat", "shop": "shop"}.get(self._mode, "kw")
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             initialfile=f"shopee_{prefix}_{label}.csv",

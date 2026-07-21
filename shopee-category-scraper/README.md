@@ -1,7 +1,8 @@
 # Shopee Scraper — Category / Keyword Edition (Windows)
 
-Paste a Shopee **category URL**, a Shopee **search URL**, a plain **keyword**,
-or **multiple keywords separated by commas**, and the app scrapes **9 pages**
+Paste a Shopee **category URL**, a Shopee **search URL**, a **shop's own
+storefront URL** (e.g. `shopee.co.th/s26_gold3`), a plain **keyword**, or
+**multiple of these separated by commas**, and the app scrapes **9 pages**
 per input, respecting whatever sort order is in the URL (defaults to
 `sortBy=sales` / สินค้าขายดี if missing).
 
@@ -48,10 +49,13 @@ Double-click: launch.bat
 
    - A category URL — `https://shopee.co.th/เครื่องสำอางสำหรับผิวหน้า-cat.11044959.11045208?page=0&sortBy=sales`
    - A search URL — `https://shopee.co.th/search?keyword=นมผง`
+   - A shop's own storefront URL — `https://shopee.co.th/s26_gold3` — to
+     rank just that one shop's own products by sales
    - A plain keyword — `นมผง`
-   - **Multiple keywords, comma-separated** — `นมผง, ยาสีฟัน, ผงซักฟอก` (each
-     runs as its own search, one after another, over the same Chrome
-     connection; you can mix category URLs and keywords in the same list)
+   - **Multiple inputs, comma-separated** — `นมผง, ยาสีฟัน, https://shopee.co.th/s26_gold3`
+     (each runs as its own scrape, one after another, over the same Chrome
+     connection; you can freely mix category/search/shop URLs and keywords
+     in the same list)
 
 2. Pick number of pages (1–9, default 9) — applies to each input
 3. Click **▶ Start Scraping**
@@ -71,13 +75,17 @@ one segment), then each segment is turned into a URL template:
 - `page=` is replaced with `0, 1, 2, …` up to the page count you chose
 - `sortBy=` is preserved (or set to `sales` if missing)
 - Any other query parameters (filters, etc.) are kept as-is
-- Each segment's category ID (`cat.XXXX.YYYY`) or keyword text is written to
-  every row it produces as the **Keyword** column
+- Each segment's category ID (`cat.XXXX.YYYY`), keyword text, or shop
+  username is written to every row it produces as the **Keyword** column
 - For a keyword segment, both the normal-search and Mall-search URLs are
   built and scraped, then merged and deduped by item ID before ranking (see
-  above) — results from different *keyword segments*, however, are never
-  deduped against each other, since the same product legitimately ranking
-  under two different keywords is two different facts worth keeping
+  above) — results from different *segments*, however, are never deduped
+  against each other, since the same product legitimately ranking under two
+  different keywords/shops is two different facts worth keeping
+- A shop URL is recognized as anything not matching category/search that
+  reduces to a single path segment (e.g. `/s26_gold3`) not already used for
+  a Shopee site section (`/search`, `/cart`, etc.) — it's scraped once, no
+  Mall-variant merge, since a shop is just itself
 - The first segment's label (plus a count of how many more) is used to name
   the Sheet tab / CSV file
 
@@ -149,7 +157,7 @@ the comments at the top of that file for the format.
 
 | Problem | Fix |
 |---|---|
-| "URL is not a category page... / not a search page..." | Paste a category URL (`-cat.<numbers>`), a search URL (`?keyword=...`), or a plain keyword |
+| "URL is not a category page... / not a search page... / recognizable shop URL" | Paste a category URL (`-cat.<numbers>`), a search URL (`?keyword=...`), a shop URL (`shopee.co.th/<username>`), or a plain keyword |
 | "Cannot connect to Chrome" | Run `start_chrome_debug.bat` first |
 | 0 products found | Make sure you're logged in to Shopee in the debug Chrome window |
 | credentials.json error | Re-download JSON key from Google Cloud Console |

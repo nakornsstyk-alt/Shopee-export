@@ -12,12 +12,13 @@
 
 ## 1. Project Purpose
 
-Given a Shopee **category URL**, a **search keyword**, or a **Shopee search
-URL**, this app scrapes up to 9 pages of product listings (rank, name, link,
-star rating, price, quantity sold per month) and exports them to CSV or a
-Google Sheet. It's used for competitor/market research — e.g. "what are the
-top-selling skincare products for keyword X, ranked by units sold" — across
-one or many keywords in a single run.
+Given a Shopee **category URL**, a **search keyword**, a **Shopee search
+URL**, or a **shop's own storefront URL**, this app scrapes up to 9 pages of
+product listings (rank, name, link, star rating, price, quantity sold per
+month) and exports them to CSV or a Google Sheet. It's used for
+competitor/market research — e.g. "what are the top-selling skincare
+products for keyword X, ranked by units sold" or "rank this one shop's own
+products by sales" — across one or many inputs in a single run.
 
 It replaces manually opening Shopee, searching, and copy-pasting product
 names/prices/sold-counts into a spreadsheet by hand.
@@ -27,6 +28,9 @@ names/prices/sold-counts into a spreadsheet by hand.
 - Accepts **one input or several, comma-separated**, in any mix of:
   - A category URL — `https://shopee.co.th/<name>-cat.<id1>.<id2>?sortBy=sales`
   - A Shopee search URL — `https://shopee.co.th/search?keyword=<kw>`
+  - A shop's own storefront URL — `https://shopee.co.th/<shop-username>`
+    (e.g. `https://shopee.co.th/s26_gold3`) — to rank just that one shop's
+    own products by sales
   - A plain keyword — `นมผง`
 - For **keyword inputs**, scrapes **both** `shopee.co.th/search` (normal
   search) **and** `shopee.co.th/mall/search` (Shopee Mall only) and merges
@@ -93,8 +97,8 @@ shopee-category-scraper/
 
 | Column | Description |
 |---|---|
-| `Rank` | Computed rank within this row's keyword/category group (qty sold desc, price asc tiebreak) — resets to 1 per group |
-| `Keyword` | The category ID or keyword text that produced this row |
+| `Rank` | Computed rank within this row's group (qty sold desc, price asc tiebreak) — resets to 1 per group |
+| `Keyword` | The category ID, keyword text, or shop username that produced this row |
 | `Name` | Product title, recovered from the item URL's SEO slug (see §7.3) |
 | `Link` | Full product URL |
 | `Stars` | Star rating (e.g. `4.9`) |
@@ -112,19 +116,32 @@ classified (`parse_input`):
 
 ```python
 CAT_ID_RE = re.compile(r"-cat\.([\d.]+)", re.IGNORECASE)
+RESERVED_SHOP_PATHS = {"search", "mall", "cart", "notifications", ...}
 
 # 1. Is it a URL? (has scheme + netloc)
-#    a. Path contains "-cat.<id>"  → mode = "category"
-#    b. Query has "?keyword=..."  → mode = "keyword"
-#    c. Neither → ValueError
+#    a. Path contains "-cat.<id>"          → mode = "category"
+#    b. Query has "?keyword=..."           → mode = "keyword"
+#    c. A single path segment not already
+#       claimed above, and not a reserved
+#       Shopee site section               → mode = "shop"
+#       (e.g. shopee.co.th/s26_gold3)
+#    d. None of the above → ValueError
 # 2. Not a URL at all → mode = "keyword", treat the whole string as the
 #    keyword, and build https://shopee.co.th/search?keyword=<text>
 ```
 
-Each parsed segment carries: `mode` (`"category"` or `"keyword"`), `base`
-(scheme+netloc+path), `query` (dict, always has `sortBy` defaulted to
-`"sales"`), and `label` (category id or keyword — used for the Keyword
-column and to name the Sheets tab / CSV file).
+`RESERVED_SHOP_PATHS` exists so a URL like `shopee.co.th/search` (no
+`?keyword=`) or `shopee.co.th/cart` isn't misread as a shop named "search"
+or "cart" — it guards shop detection to only fire on segments that aren't
+already a known Shopee site section.
+
+Each parsed segment carries: `mode` (`"category"`, `"keyword"`, or
+`"shop"`), `base` (scheme+netloc+path), `query` (dict, always has `sortBy`
+defaulted to `"sales"`), and `label` (category id, keyword, or shop
+username — used for the Keyword column and to name the Sheets tab / CSV
+file). Shop inputs are scraped once, like category inputs — no Mall-variant
+merge, since a shop's storefront doesn't have a separate Mall/normal split
+(that distinction only exists for the site-wide search results, §7.5).
 
 `build_page_url(parsed, page_num)` clones `query`, sets `page=<page_num>`,
 and URL-encodes it onto `base`.
@@ -342,6 +359,12 @@ Plain Tkinter (`tkinter` + `ttk`), single window, no external UI framework:
   price, their relative order is whatever Python's stable sort happened to
   produce (effectively scrape order) — not a meaningful distinction in
   practice.
+- **Shop-page card layout is assumed, not live-verified.** Shop-mode reuses
+  the same `CARD_SELECTORS` and field-extraction JS as category/search
+  pages, since Shopee's shop storefront grid has historically used the same
+  card markup — but this hasn't been confirmed against a live shop page. If
+  a shop scrape returns 0 items while the same shop's products clearly
+  exist, check DevTools on that live shop page first (see Troubleshooting).
 - Extracted-but-unused fields exist in the scraper (original price, discount
   %, mall flag, shipping tag, location, sponsored flag) — captured in the
   JS `results.push({...})` object but not currently carried through to the
