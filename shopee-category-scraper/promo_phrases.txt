@@ -1,0 +1,23 @@
+# Promo / marketing badge phrases to exclude from the scraped "Name" column.
+#
+# One phrase per line. Matching is a plain, case-insensitive substring check —
+# no regex needed. Lines starting with '#' are comments and blank lines are
+# ignored.
+#
+# If you spot a promo badge showing up as an item's name, just add the exact
+# text here and save — no code changes needed, the next scrape picks it up.
+#
+# Numeric "buy N pieces, get discount" badges (e.g. "ซื้อ 2 ชิ้น ลด ฿1") don't
+# need an entry — those are caught automatically regardless of wording.
+
+แถม
+รับสินค้าฟรี
+ขายส่ง
+ส่งฟรี
+โค้ดส่วนลด
+คูปองส่วนลด
+คุ้มกว่าเดิม
+ลดสูงสุด
+ดีลเด็ด
+flash sale
+voucher
