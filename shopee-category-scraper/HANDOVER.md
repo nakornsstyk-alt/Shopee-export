@@ -145,16 +145,28 @@ merge, since a shop's storefront doesn't have a separate Mall/normal split
 
 **Shop-mode per-month filter:** a shop's own page shows the sorted product
 grid — where sold counts are *per month* ("ขายได้ X ชิ้น/เดือน") — plus one
-or more recommendation/highlight carousels above it, whose cards show
-*lifetime* totals ("ขายแล้ว X ชิ้น") and are usually different products. The
-link-based scraper picks up both, so shop mode keeps only cards whose sold
-text carries the per-month marker (`/เดือน`, or `/month` in English). The
-extraction records this as a `soldPerMonth` boolean per card; the shop
-branch filters on it. If a shop happens to have *no* per-month-marked cards
-at all, the filter is skipped (keep everything) rather than returning empty.
-This filter is shop-mode only — category/search pages legitimately show
-lifetime "ขายแล้ว" counts, so filtering them per-month would wrongly drop
-everything.
+or more recommendation/bestseller rails above it, whose cards show *lifetime*
+totals ("ขายแล้ว X ชิ้น"). Crucially, those rails often repeat products that
+*also* appear in the grid. The scraper handles this in two places:
+
+1. **Per-page:** anchors are grouped by item id, and when the same product
+   has multiple cards on a page, the one whose card carries a per-month
+   marker (`/เดือน`, or `/month`) is chosen over a lifetime duplicate — so a
+   product isn't recorded as lifetime just because its rail card sits higher
+   in the DOM than its grid card. `soldPerMonth` is recorded per resulting
+   card.
+2. **Across pages:** the shop branch applies the per-month filter *before*
+   the item-id dedup (`_rank_group`), so a product's monthly card (possibly
+   from a later page) survives and its lifetime card is dropped — the dedup
+   then keeps the monthly one.
+
+The net effect: any product that appears with a monthly figure *anywhere*
+across the scraped pages is kept with that figure; only products that are
+*only ever* shown as lifetime (pure rail entries) are dropped. If a shop has
+*no* per-month markers at all, the filter is skipped (keep everything)
+rather than returning empty. This is shop-mode only — category/search pages
+legitimately show lifetime "ขายแล้ว" counts, so filtering them per-month
+would wrongly drop everything.
 
 `build_page_url(parsed, page_num)` clones `query`, sets `page=<page_num>`,
 and URL-encodes it onto `base`.
