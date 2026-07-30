@@ -149,14 +149,25 @@ def scrape_shopee_category(category_url: str, log_fn, max_pages: int = MAX_PAGES
             url = build_category_url(parsed, page_num)
             log_fn(f"📄 Page {page_num + 1}/{max_pages} → {url}")
 
-            page.goto(url, wait_until="networkidle", timeout=40000)
-            time.sleep(2.5)   # let React hydrate
+            # Don't wait for "networkidle" — Shopee keeps analytics, chat
+            # widget, and lazy image loaders busy indefinitely, so it never
+            # goes idle and goto() times out at 40s. domcontentloaded returns
+            # as soon as the HTML is parsed; the scroll loop below handles
+            # the rest of the hydration.
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                log_fn(f"  ⚠️  Navigation issue on page {page_num + 1}: {e}")
+                log_fn("      Continuing — page may still be usable.")
+
+            # Give Shopee's React app a beat to render before hunting for cards.
+            time.sleep(4)
 
             # scroll to load all lazy images / cards
-            for _ in range(8):
+            for _ in range(12):
                 page.mouse.wheel(0, 1000)
-                time.sleep(0.35)
-            time.sleep(1.5)
+                time.sleep(0.4)
+            time.sleep(2)
 
             card_sel, card_count = find_cards(page)
             if not card_sel:
